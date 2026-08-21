@@ -1,0 +1,44 @@
+# Python bytecode and tooling caches
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments and local configuration
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+.cache/
+
+# Training, evaluation, and experiment artifacts
+cache/
+logs/
+outputs/
+checkpoints/
+ray_results/
+wandb/
+test_results/
+eval/results/
+eval/thinking_results/
+
+# Large model artifacts and run output
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.bin
+*.log
+*.out
+*.err
+*.tmp
+
+# Operating-system and editor files
+.DS_Store
+.idea/
+.vscode/

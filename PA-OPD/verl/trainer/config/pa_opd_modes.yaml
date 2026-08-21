@@ -1,0 +1,37 @@
+defaults:
+  - pa_opd
+  - _self_
+
+pa_opd_legacy_rollout_resume: ${oc.env:PA_OPD_ALLOW_LEGACY_ROLLOUT_RESUME,0}
+
+# This remains 8 for static VERL validation and worker construction.  The
+# PA-OPD driver overrides the existing leaf per step in adaptive mode.
+actor_rollout_ref:
+  actor:
+    ppo_mini_batch_size: 32
+  rollout:
+    n: 8
+
+custom_reward_function:
+  path: ${oc.env:PA_OPD_CODE_ROOT}/verl/utils/reward_score/pa_opd_dynamic_reward.py
+  name: compute_score
+
+pa_opd_runtime:
+  mode: ${oc.env:PA_OPD_MODE,adaptive_format}
+  rlvr_loss_coef: 0.1
+  adaptive_format:
+    recovery_rollout_n: 8
+    opd_only_rollout_n: 1
+    valid_threshold: 0.90
+    stable_steps: 3
+  reward:
+    format_coef: 0.1
+    accuracy_coef: 1.0
+
+trainer:
+  experiment_name: ${oc.env:PA_OPD_RUN_NAME}
+  default_local_dir: ${oc.env:PA_OPD_WORK_ROOT}/checkpoints
+  rollout_data_dir: ${oc.env:PA_OPD_WORK_ROOT}/rollouts
+  save_freq: 10
+  resume_mode: auto
+  resume_from_path: null
