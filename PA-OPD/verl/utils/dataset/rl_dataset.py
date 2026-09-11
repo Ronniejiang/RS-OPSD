@@ -16,9 +16,11 @@
 
 import copy
 import logging
+import math
 import os
 import re
 import traceback
+import warnings
 from collections import defaultdict
 from io import BytesIO
 from typing import Optional
@@ -27,7 +29,7 @@ import datasets
 import numpy as np
 import torch
 from omegaconf import DictConfig, ListConfig
-from PIL import Image
+from PIL import Image, ImageDraw
 from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
@@ -141,9 +143,14 @@ class RLHFDataset(Dataset):
         self.seed = config.get("seed")
         # PA-OPD reads the supplied Vision-OPD-6K JSONL in memory. This keeps
         # source images in /dataset_rc and avoids materializing a workspace cache.
-        self.pa_opd_raw_jsonl = config.get("pa_opd_raw_jsonl", False)
+        # PA-OPDVR intentionally exposes only the two direct JSONL protocols.
+        self.pa_opd_direct_jsonl = config.get("pa_opd_direct_jsonl", False)
+        self.pa_opd_direct_three_image_jsonl = config.get("pa_opd_direct_three_image_jsonl", False)
+        if self.pa_opd_direct_jsonl and self.pa_opd_direct_three_image_jsonl:
+            raise ValueError("Choose one PA-OPDVR JSONL loader mode")
+        pa_opd_loader_count = int(self.pa_opd_direct_jsonl) + int(self.pa_opd_direct_three_image_jsonl)
 
-        if not self.pa_opd_raw_jsonl:
+        if pa_opd_loader_count == 0:
             self._download()
         self._read_files_and_tokenize()
 
@@ -157,11 +164,15 @@ class RLHFDataset(Dataset):
     def _read_files_and_tokenize(self):
         dataframes = []
         for parquet_file in self.data_files:
-            if self.pa_opd_raw_jsonl:
-                from verl.utils.dataset.pa_opd_dataset import load_pa_opd_jsonl
+            if self.pa_opd_direct_jsonl:
+                from verl.utils.dataset.pa_opd_dataset import load_pa_opd_direct_jsonl
 
-                dataframe = load_pa_opd_jsonl(parquet_file)
-            # read files and cache
+                dataframe = load_pa_opd_direct_jsonl(parquet_file)
+            elif self.pa_opd_direct_three_image_jsonl:
+                from verl.utils.dataset.pa_opd_dataset import load_pa_opd_direct_three_image_jsonl
+
+                dataframe = load_pa_opd_direct_three_image_jsonl(parquet_file)
+
             elif parquet_file.endswith(".parquet"):
                 dataframe = datasets.load_dataset("parquet", data_files=parquet_file)["train"]
             elif parquet_file.endswith(".json"):
@@ -374,6 +385,51 @@ class RLHFDataset(Dataset):
         row_dict["interaction_kwargs"] = interaction_kwargs
         return row_dict
 
+    @staticmethod
+    def _load_opsd_image(content: dict) -> Image.Image:
+        """Load a trusted OPSD image record without mutating its source file."""
+        image = content.get("image", content.get("path"))
+        if isinstance(image, Image.Image):
+            return image.convert("RGB").copy()
+        if isinstance(image, dict):
+            image_bytes = image.get("bytes")
+            if image_bytes is not None:
+                with Image.open(BytesIO(image_bytes)) as image_file:
+                    return image_file.convert("RGB")
+            image = image.get("image", image.get("path"))
+        if isinstance(image, str):
+            # RS_OPD originals can be 10k x 10k (> Pillow decompression-bomb
+            # warning threshold), but they are explicit local dataset files.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", Image.DecompressionBombWarning)
+                with Image.open(image) as image_file:
+                    return image_file.convert("RGB")
+        raise TypeError(f"Unsupported OPSD image type: {type(image)}")
+
+    @classmethod
+    def _draw_opsd_bbox(cls, content: dict) -> Image.Image:
+        """Draw a red original-coordinate OPSD bbox on a transient image copy."""
+        bbox = content.get("bbox")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            raise ValueError("OPSD bbox image content must contain [x0, y0, x1, y1]")
+        if any(isinstance(value, bool) or not isinstance(value, int | float) for value in bbox):
+            raise ValueError("OPSD bbox coordinates must be numeric")
+        x0, y0, x1, y1 = (float(value) for value in bbox)
+        if not all(math.isfinite(value) for value in (x0, y0, x1, y1)):
+            raise ValueError("OPSD bbox coordinates must be finite")
+        image = cls._load_opsd_image(content)
+        width, height = image.size
+        if x0 < 0 or y0 < 0 or x1 <= x0 or y1 <= y0 or x1 > width or y1 > height:
+            raise ValueError(
+                f"OPSD bbox {(x0, y0, x1, y1)!r} is outside image dimensions {(width, height)!r}"
+            )
+        # Existing 2048 prepared images use a five-pixel red frame. Scale the
+        # source frame first so the processor 4096 cap preserves that look.
+        line_width = max(1, round(min(width, height) * 5 / 2048))
+        output = image.copy()
+        ImageDraw.Draw(output).rectangle((x0, y0, x1, y1), outline=(255, 0, 0), width=line_width)
+        return output
+
     @classmethod
     async def process_vision_info(
         cls,
@@ -403,6 +459,24 @@ class RLHFDataset(Dataset):
             images: List of images.
             videos: List of videos, each video is a tuple of (video_tensor, video_metadata).
         """
+        has_opsd_bbox = any(
+            isinstance(content, dict) and content.get("type") == "image" and "bbox" in content
+            for message in messages
+            for content in message.get("content", [])
+        )
+        if has_opsd_bbox:
+            images = []
+            for message in messages:
+                for content in message.get("content", []):
+                    if not isinstance(content, dict):
+                        continue
+                    if content.get("type") == "video":
+                        raise RuntimeError("OPSD original-image mode supports image inputs only")
+                    if content.get("type") != "image":
+                        continue
+                    images.append(cls._draw_opsd_bbox(content) if "bbox" in content else cls._load_opsd_image(content))
+            return images, None
+
         try:
             from qwen_vl_utils import process_vision_info
         except ModuleNotFoundError as exc:

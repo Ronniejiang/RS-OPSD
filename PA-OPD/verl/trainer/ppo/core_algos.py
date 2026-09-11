@@ -1082,6 +1082,215 @@ def agg_loss(
     return loss
 
 
+def compute_opdvr_loss(
+    student_log_probs: torch.Tensor,
+    teacher_log_probs: torch.Tensor,
+    semantic_token_mask: torch.Tensor,
+    trajectory_correct: torch.Tensor,
+    teacher_reliable: torch.Tensor,
+    self_distillation_config: Any,
+    *,
+    teacher_present_mask: Optional[torch.Tensor] = None,
+    old_log_probs: Optional[torch.Tensor] = None,
+    rollout_is_weights: Optional[torch.Tensor] = None,
+    loss_agg_mode: str = "token-mean",
+    batch_num_tokens: Optional[int] = None,
+    global_batch_size: Optional[int] = None,
+    loss_scale_factor: Optional[int] = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Compute GT-conditioned sampled-token OPDVR on Student trajectories.
+
+    The implicit Teacher reward is log p_T(y_t) - log p_S(y_t). Correct
+    trajectories retain only positive rewards and incorrect trajectories
+    retain only negative rewards. The resulting signed advantage is detached
+    before multiplying the Student sampled-token log probability.
+    """
+
+    if student_log_probs.shape != teacher_log_probs.shape:
+        raise ValueError("Student and Teacher sampled-token log probabilities must have identical shapes.")
+    if semantic_token_mask.shape != student_log_probs.shape:
+        raise ValueError("semantic_token_mask must match sampled-token log-probability shape.")
+    batch_size = student_log_probs.shape[0]
+    if trajectory_correct.shape != (batch_size,):
+        raise ValueError("trajectory_correct must be shaped [batch].")
+    if teacher_reliable.shape != (batch_size,):
+        raise ValueError("teacher_reliable must be shaped [batch].")
+
+    loss_mask = semantic_token_mask.to(dtype=student_log_probs.dtype)
+    if teacher_present_mask is not None:
+        if teacher_present_mask.shape != (batch_size,):
+            raise ValueError("teacher_present_mask must be shaped [batch].")
+        loss_mask = loss_mask * teacher_present_mask.to(loss_mask.dtype).unsqueeze(1)
+
+    correct = trajectory_correct.to(device=student_log_probs.device, dtype=torch.bool)
+    reliable = teacher_reliable.to(device=student_log_probs.device, dtype=student_log_probs.dtype)
+    sign = torch.where(
+        correct,
+        torch.ones_like(correct, dtype=student_log_probs.dtype),
+        -torch.ones_like(correct, dtype=student_log_probs.dtype),
+    ).unsqueeze(1)
+    implicit_teacher_reward = (teacher_log_probs - student_log_probs).detach()
+    signed_advantage = (sign * torch.relu(sign * implicit_teacher_reward)).detach()
+    raw_per_token_loss = -signed_advantage * student_log_probs
+    weighted_per_token_loss = raw_per_token_loss * reliable.unsqueeze(1)
+
+    is_clip = self_distillation_config.is_clip
+    if is_clip is not None:
+        if old_log_probs is None:
+            raise ValueError("old_log_probs is required for OPDVR IS correction.")
+        negative_approx_kl = (student_log_probs - old_log_probs).detach().clamp(min=-20.0, max=20.0)
+        weighted_per_token_loss = weighted_per_token_loss * torch.exp(negative_approx_kl).clamp(max=is_clip)
+    if rollout_is_weights is not None:
+        weighted_per_token_loss = weighted_per_token_loss * rollout_is_weights
+
+    valid_token_count = loss_mask.sum().clamp(min=1.0)
+    if batch_num_tokens is None:
+        batch_num_tokens = valid_token_count
+    reliable_token_mask = loss_mask * reliable.unsqueeze(1)
+    reinforce_mask = (signed_advantage > 0).to(loss_mask.dtype) * reliable_token_mask
+    suppress_mask = (signed_advantage < 0).to(loss_mask.dtype) * reliable_token_mask
+    active_mask = reinforce_mask + suppress_mask
+    metrics = {
+        "opdvr/implicit_teacher_reward_token_mean": (
+            verl_F.masked_sum(implicit_teacher_reward, loss_mask) / valid_token_count
+        ).detach().item(),
+        "opdvr/advantage_abs_token_mean": (
+            verl_F.masked_sum(signed_advantage.abs() * reliable.unsqueeze(1), loss_mask) / valid_token_count
+        ).detach().item(),
+        "opdvr/reinforce_token_fraction": (reinforce_mask.sum() / valid_token_count).detach().item(),
+        "opdvr/suppress_token_fraction": (suppress_mask.sum() / valid_token_count).detach().item(),
+        "opdvr/active_token_fraction": (active_mask.sum() / valid_token_count).detach().item(),
+        "opdvr/teacher_reliable_fraction": reliable.mean().detach().item(),
+        "opdvr/trajectory_correct_fraction": correct.float().mean().detach().item(),
+        "opdvr/num_semantic_tokens": loss_mask.sum().detach().item(),
+        "opdvr/empty_target_batch": float(loss_mask.sum().detach().item() == 0),
+    }
+    loss = agg_loss(
+        loss_mat=weighted_per_token_loss,
+        loss_mask=loss_mask,
+        loss_agg_mode=loss_agg_mode,
+        batch_num_tokens=batch_num_tokens,
+        global_batch_size=global_batch_size,
+        loss_scale_factor=loss_scale_factor,
+    )
+    return loss, metrics
+
+
+def compute_pa_opd_safe_topk_jsd_loss(
+    student_topk_log_probs: torch.Tensor,
+    teacher_topk_log_probs: torch.Tensor,
+    topk_token_ids: torch.Tensor,
+    topk_valid_mask: torch.Tensor,
+    target_token_ids: torch.Tensor,
+    allowed_token_ids: torch.Tensor,
+    prefix_mask: torch.Tensor,
+    teacher_reliable: torch.Tensor,
+    self_distillation_config: Any,
+    *,
+    teacher_present_mask: Optional[torch.Tensor] = None,
+    student_log_probs: Optional[torch.Tensor] = None,
+    old_log_probs: Optional[torch.Tensor] = None,
+    rollout_is_weights: Optional[torch.Tensor] = None,
+    loss_agg_mode: str = "token-mean",
+    batch_num_tokens: Optional[int] = None,
+    global_batch_size: Optional[int] = None,
+    loss_scale_factor: Optional[int] = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """JSD on a shared top-k support with non-GT answer choices removed."""
+
+    if student_topk_log_probs.shape != teacher_topk_log_probs.shape:
+        raise ValueError("Student and Teacher top-k log probabilities must have identical shapes.")
+    if topk_token_ids.shape != student_topk_log_probs.shape:
+        raise ValueError("topk_token_ids must match top-k log probabilities.")
+    if topk_valid_mask.shape != student_topk_log_probs.shape:
+        raise ValueError("topk_valid_mask must match top-k log probabilities.")
+    if prefix_mask.shape != student_topk_log_probs.shape[:2]:
+        raise ValueError("prefix_mask must be [batch, response].")
+    if target_token_ids.shape != prefix_mask.shape:
+        raise ValueError("target_token_ids must match prefix_mask.")
+    if allowed_token_ids.shape[:2] != prefix_mask.shape:
+        raise ValueError("allowed_token_ids must be [batch, response, candidates].")
+    if teacher_reliable.shape != (student_topk_log_probs.shape[0],):
+        raise ValueError("teacher_reliable must be shaped [batch].")
+
+    support_valid = topk_valid_mask.to(device=student_topk_log_probs.device, dtype=torch.bool)
+    token_ids = topk_token_ids.to(device=student_topk_log_probs.device, dtype=torch.long)
+    active = prefix_mask.to(device=student_topk_log_probs.device, dtype=torch.bool)
+    target = target_token_ids.to(device=student_topk_log_probs.device, dtype=torch.long)
+    allowed = allowed_token_ids.to(device=student_topk_log_probs.device, dtype=torch.long)
+    target_present = (token_ids.eq(target.unsqueeze(-1)) & support_valid).any(dim=-1)
+    if torch.any(active & ~target_present):
+        raise ValueError("Shared top-k support is missing a required GT answer token.")
+    allowed_valid = allowed.ge(0)
+    allowed_present = (
+        token_ids.unsqueeze(-1).eq(allowed.unsqueeze(-2)) & support_valid.unsqueeze(-1)
+    ).any(dim=-2)
+    if torch.any(active.unsqueeze(-1) & allowed_valid & ~allowed_present):
+        raise ValueError("Shared top-k support is missing a legal direct-answer continuation.")
+
+    student_probs = student_topk_log_probs.exp() * support_valid.to(student_topk_log_probs.dtype)
+    teacher_probs = teacher_topk_log_probs.detach().exp() * support_valid.to(teacher_topk_log_probs.dtype)
+    student_tail = (1.0 - student_probs.sum(dim=-1, keepdim=True)).clamp_min(1e-8)
+    teacher_tail = (1.0 - teacher_probs.sum(dim=-1, keepdim=True)).clamp_min(1e-8)
+    legal_non_target = (
+        token_ids.unsqueeze(-1).eq(allowed.unsqueeze(-2)) & allowed_valid.unsqueeze(-2)
+    ).any(dim=-1) & ~token_ids.eq(target.unsqueeze(-1)) & support_valid
+    removed_teacher_mass = teacher_probs * legal_non_target.to(teacher_probs.dtype)
+    safe_teacher_probs = teacher_probs.masked_fill(legal_non_target, 0.0)
+    safe_teacher = torch.cat([safe_teacher_probs, teacher_tail], dim=-1)
+    safe_teacher = safe_teacher / safe_teacher.sum(dim=-1, keepdim=True).clamp_min(1e-8)
+    student = torch.cat([student_probs, student_tail], dim=-1)
+    mixture = 0.5 * (student + safe_teacher)
+
+    def kl_to_mixture(probabilities: torch.Tensor) -> torch.Tensor:
+        return torch.where(
+            probabilities > 0,
+            probabilities * (probabilities.clamp_min(1e-8).log() - mixture.clamp_min(1e-8).log()),
+            torch.zeros_like(probabilities),
+        )
+
+    raw_per_token_loss = 0.5 * (kl_to_mixture(student) + kl_to_mixture(safe_teacher)).sum(dim=-1)
+    loss_mask = active.to(dtype=student_topk_log_probs.dtype)
+    if teacher_present_mask is not None:
+        if teacher_present_mask.shape != (student_topk_log_probs.shape[0],):
+            raise ValueError("teacher_present_mask must be shaped [batch].")
+        loss_mask = loss_mask * teacher_present_mask.to(loss_mask.dtype).unsqueeze(1)
+    reliable = teacher_reliable.to(device=student_topk_log_probs.device, dtype=loss_mask.dtype)
+    weighted_per_token_loss = raw_per_token_loss * reliable.unsqueeze(1)
+    if self_distillation_config.is_clip is not None:
+        if student_log_probs is None or old_log_probs is None:
+            raise ValueError("top-k JSD IS correction requires current and rollout log probabilities.")
+        ratio = torch.exp((student_log_probs - old_log_probs).detach().clamp(min=-20.0, max=20.0))
+        weighted_per_token_loss = weighted_per_token_loss * ratio.clamp(max=self_distillation_config.is_clip)
+    if rollout_is_weights is not None:
+        weighted_per_token_loss = weighted_per_token_loss * rollout_is_weights
+
+    valid_token_count = loss_mask.sum().clamp(min=1.0)
+    if batch_num_tokens is None:
+        batch_num_tokens = valid_token_count
+    metrics = {
+        "topk_jsd/raw_token_mean": (verl_F.masked_sum(raw_per_token_loss, loss_mask) / valid_token_count).detach().item(),
+        "topk_jsd/weighted_token_mean": (
+            verl_F.masked_sum(weighted_per_token_loss, loss_mask) / valid_token_count
+        ).detach().item(),
+        "topk_jsd/teacher_removed_non_gt_mass": (
+            verl_F.masked_sum(removed_teacher_mass.sum(dim=-1), loss_mask) / valid_token_count
+        ).detach().item(),
+        "topk_jsd/teacher_reliable_fraction": reliable.mean().detach().item(),
+        "topk_jsd/num_prefix_tokens": loss_mask.sum().detach().item(),
+        "topk_jsd/empty_target_batch": float(loss_mask.sum().detach().item() == 0),
+    }
+    loss = agg_loss(
+        loss_mat=weighted_per_token_loss,
+        loss_mask=loss_mask,
+        loss_agg_mode=loss_agg_mode,
+        batch_num_tokens=batch_num_tokens,
+        global_batch_size=global_batch_size,
+        loss_scale_factor=loss_scale_factor,
+    )
+    return loss, metrics
+
+
 def compute_self_distillation_loss(
     student_log_probs: torch.Tensor,
     teacher_log_probs: torch.Tensor,

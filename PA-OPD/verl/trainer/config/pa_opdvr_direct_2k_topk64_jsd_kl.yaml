@@ -1,0 +1,22 @@
+# 2K direct PA-OPDVR + KL with GT-safe top-64 JSD on reliable Teacher guidance.
+defaults:
+  - pa_opdvr_direct_2k_kl
+  - _self_
+
+actor_rollout_ref:
+  actor:
+    self_distillation:
+      # Request Student top-64 logits, unioned with every legal GT-answer
+      # continuation. The Teacher is evaluated on exactly that shared support.
+      full_logit_distillation: true
+      distillation_topk: 64
+      distillation_add_tail: true
+      alpha: 0.5
+      pa_opd_topk_jsd_enabled: true
+      pa_opd_topk_jsd_coef: 1.0
+
+trainer:
+  group_name: pa-opdvr-direct-2k-topk64-jsd-kl
+  experiment_name: ${oc.env:PA_OPD_RUN_NAME,pa-opdvr-direct-2k-topk64-jsd-kl}
+  default_local_dir: ${oc.env:PA_OPD_WORK_DIR,outputs/pa-opdvr-direct-2k-topk64-jsd-kl}/checkpoints
+  rollout_data_dir: ${oc.env:PA_OPD_WORK_DIR,outputs/pa-opdvr-direct-2k-topk64-jsd-kl}/rollouts

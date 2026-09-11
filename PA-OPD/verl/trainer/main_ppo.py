@@ -33,29 +33,19 @@ from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_extern_object
 
 
-def _install_pa_opd_runtime_hooks_in_task_runner(config) -> bool:
-    """Install PA-OPD lifecycle hooks in the process that owns the trainer.
 
-    ``run_ppo`` creates ``TaskRunner`` as a Ray actor, so entrypoint-side
-    monkey patches live only in the driver unless they are installed again
-    here. The generic PPO path remains unchanged for configurations without
-    ``pa_opd_runtime``.
-    """
+def _install_pa_opd_direct_hooks_in_task_runner(config) -> bool:
+    """Install the static direct-answer PA-OPDVR protocol in TaskRunner."""
 
-    if config.get("pa_opd_runtime", None) is None:
+    if not config.get("pa_opd_direct", False):
         return False
 
-    from verl.trainer.main_pa_opd import _install_runtime_hooks
+    from verl.trainer.main_pa_opd_direct import _install_direct_hooks
 
-    _install_runtime_hooks()
-    legacy_flag = config.get("pa_opd_legacy_rollout_resume", os.environ.get("PA_OPD_ALLOW_LEGACY_ROLLOUT_RESUME", "0"))
-    legacy_migration = str(legacy_flag).strip().lower() in {"1", "true", "yes", "on"}
-    if legacy_migration:
-        from verl.trainer.main_pa_opd_resume import _install_legacy_migration_hook
-
-        _install_legacy_migration_hook()
-    print(f"[PA-OPD] installed runtime hooks in remote TaskRunner (legacy_migration={legacy_migration})")
+    _install_direct_hooks()
+    print("[PA-OPD direct] installed reward-free direct OPDVR hooks in remote TaskRunner")
     return True
+
 
 
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
@@ -318,7 +308,7 @@ class TaskRunner:
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
         pprint(OmegaConf.to_container(config, resolve=True))
         OmegaConf.resolve(config)
-        _install_pa_opd_runtime_hooks_in_task_runner(config)
+        _install_pa_opd_direct_hooks_in_task_runner(config)
 
         actor_rollout_cls, ray_worker_group_cls = self.add_actor_rollout_worker(config)
         self.add_critic_worker(config)
@@ -366,9 +356,10 @@ class TaskRunner:
             and self_distillation_cfg.get("teacher_always_on", False)
             and self_distillation_cfg.get("teacher_image_key", None) is not None
             and not self_distillation_cfg.get("fallback_to_policy_loss_on_missing_teacher", False)
-            # PA-OPD combines VOPD with Format-RLVR, so it must retain the
-            # configured custom format reward during training.
-            and not self_distillation_cfg.get("pa_opd_enabled", False)
+            and (
+                not self_distillation_cfg.get("pa_opd_enabled", False)
+                or self_distillation_cfg.get("pa_opd_reward_free", False)
+            )
         )
 
         if reward_free_teacher_vopd:

@@ -51,6 +51,7 @@ from verl.trainer.config import AlgoConfig
 from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import AdvantageEstimator, agg_loss
 from verl.trainer.ppo.pa_opd import normalize_option_label
+from verl.trainer.ppo.pa_opd_direct import build_direct_probe_plan
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
@@ -654,8 +655,9 @@ class RayPPOTrainer:
         loss_mode = self.config.actor_rollout_ref.actor.policy_loss.get("loss_mode", "vanilla")
         if self_distillation_cfg is None or loss_mode != "vopd":
             return False
-        # PA-OPD retains a format-only RL reward even with an always-on teacher.
-        if self_distillation_cfg.get("pa_opd_enabled", False):
+        if self_distillation_cfg.get("pa_opd_enabled", False) and not self_distillation_cfg.get(
+            "pa_opd_reward_free", False
+        ):
             return False
         if not self_distillation_cfg.get("teacher_always_on", False):
             return False
@@ -927,22 +929,28 @@ class RayPPOTrainer:
     ) -> list[dict]:
         """Build a PA-OPD teacher prompt with integrated privileged detail.
 
-        The teacher may use the extra local detail throughout its reasoning and
-        answer distribution. Evidence provenance is suppressed in the text so
-        distillation transfers the visual conclusion rather than references to
-        an unavailable crop.
+        The teacher receives the original scene and its evidence crop together
+        with the same question and answer protocol used by the student.
         """
         integrated_evidence_instruction = (
-            "\nThe second image provides additional high-resolution detail for a region of the original scene. "
-            "Use all visual evidence from both images to analyse the question and continue the student's reasoning. "
-            "State resulting visual observations directly and naturally as facts about the scene. "
-            "Do not mention, compare, or name the image sources: never say crop, close-up, second image, "
-            "additional view, bounding box, local evidence, zoom, or that an observation comes from another image. "
-            "Do not explain the answer in terms of how it was seen; follow the supplied student prefix faithfully.\n"
+            "\nUse the visual evidence in both images to answer the question and follow the supplied answer protocol.\n"
         )
+        # Auxiliary random views belong to the Student and frozen KL reference
+        # only. Strip them before assembling the privileged Teacher prompt.
+        prompt_messages = deepcopy(prompt_messages)
+        for message in prompt_messages:
+            if isinstance(message.get("content"), list):
+                message["content"] = [
+                    item for item in message["content"]
+                    if not (
+                        isinstance(item, dict)
+                        and item.get("type") == "image"
+                        and item.get("pa_opd_student_only", False)
+                    )
+                ]
         original_images = self._extract_images_from_messages(prompt_messages)
         if len(original_images) != 1:
-            raise ValueError(f"PA-OPD requires exactly one student image, got {len(original_images)}.")
+            raise ValueError(f"PA-OPD requires exactly one global image after removing Student-only views, got {len(original_images)}.")
         normalized_crops = [self._normalize_teacher_image(image) for image in crop_images]
         if len(normalized_crops) != 1:
             raise ValueError(f"PA-OPD requires exactly one evidence crop, got {len(normalized_crops)}.")
@@ -1315,13 +1323,6 @@ class RayPPOTrainer:
             raise ValueError(f"PA-OPD option labels map to duplicate token ids: {dict(zip(labels, token_ids))!r}")
         return torch.tensor(token_ids, dtype=torch.long)
 
-    def _pa_opd_tag_token_ids(self) -> dict[str, list[int]]:
-        tokenizer = getattr(self.processor, "tokenizer", self.tokenizer)
-        tags = ("<think>", "</think>", "<answer>", "</answer>")
-        token_ids = {tag: tokenizer.encode(tag, add_special_tokens=False) for tag in tags}
-        if any(not value for value in token_ids.values()):
-            raise ValueError(f"PA-OPD could not tokenize format tags: {token_ids!r}")
-        return token_ids
 
     def _pad_pa_opd_prompt_inputs(
         self, prefix: str, records: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, Any]], device: torch.device
@@ -1353,13 +1354,103 @@ class RayPPOTrainer:
             list(multi_modal),
         )
 
+    def _build_pa_opd_direct_probe_batch(
+        self, batch: DataProto, teacher_messages_list: list[list[dict]], device: torch.device
+    ) -> tuple[DataProto, dict[str, float]]:
+        """Build GT-path constrained Teacher probes for direct multi-select answers."""
+
+        cfg = self.config.actor_rollout_ref.actor.self_distillation
+        processing_class = self.processor or self.tokenizer
+        tokenizer = getattr(processing_class, "tokenizer", processing_class)
+        apply_kwargs = dict(self.config.data.apply_chat_template_kwargs or {})
+        apply_kwargs.update({"enable_thinking": False, "pa_opd_direct_answer_probe": True})
+        # A probe forward uses one rectangular response window for its whole
+        # microbatch, so variable-length GT paths must be padded before their
+        # Teacher inputs are assembled, not only in the target tensor below.
+        plans = []
+        prompt_specs = []
+        reward_model_info = batch.non_tensor_batch.get("reward_model", [None] * len(batch))
+        extra_info = batch.non_tensor_batch.get("extra_info", [None] * len(batch))
+
+        for idx, teacher_messages in enumerate(teacher_messages_list):
+            info = extra_info[idx] if idx < len(extra_info) else None
+            if not isinstance(info, dict) or not info.get("option_labels"):
+                raise ValueError(f"Direct PA-OPDVR requires option_labels in extra_info for sample {idx}")
+            answer = None
+            if idx < len(reward_model_info) and isinstance(reward_model_info[idx], dict):
+                answer = reward_model_info[idx].get("ground_truth")
+            if answer is None:
+                answer = info.get("answer")
+            prompt_text = processing_class.apply_chat_template(
+                teacher_messages, tokenize=False, add_generation_prompt=True, **apply_kwargs
+            )
+            plan = build_direct_probe_plan(tokenizer, prompt_text, info["option_labels"], answer)
+            plans.append(plan)
+            prompt_specs.append((teacher_messages, plan))
+        max_steps = max(len(plan.response_token_ids) for plan in plans)
+        pad_token_id = int(self.tokenizer.pad_token_id or 0)
+        teacher_records = []
+        probe_responses = []
+        for teacher_messages, plan in prompt_specs:
+            real_response = torch.tensor(plan.response_token_ids, dtype=torch.long)
+            response = torch.full((max_steps,), pad_token_id, dtype=torch.long)
+            response[: real_response.numel()] = real_response
+            response_mask = torch.zeros_like(response)
+            response_mask[: real_response.numel()] = 1
+            teacher_records.append(
+                self._build_teacher_prompt_inputs(
+                    teacher_messages,
+                    response,
+                    response_mask,
+                    cfg.max_reprompt_len,
+                    apply_kwargs,
+                )
+            )
+            probe_responses.append(response)
+        teacher_tensors, teacher_multi_modal = self._pad_pa_opd_prompt_inputs(
+            "pa_opd_teacher_probe", teacher_records, device
+        )
+        max_candidates = max(len(choices) for plan in plans for choices in plan.allowed_token_ids)
+        padded_responses = torch.full(
+            (len(plans), max_steps),
+            int(self.tokenizer.pad_token_id or 0),
+            dtype=torch.long,
+            device=device,
+        )
+        response_mask = torch.zeros((len(plans), max_steps), dtype=torch.long, device=device)
+        allowed_token_ids = torch.full(
+            (len(plans), max_steps, max_candidates), -1, dtype=torch.long, device=device
+        )
+        for row_idx, (response, plan) in enumerate(zip(probe_responses, plans, strict=True)):
+            real_length = len(plan.response_token_ids)
+            padded_responses[row_idx] = response.to(device)
+            response_mask[row_idx, :real_length] = 1
+            for step_idx, candidates in enumerate(plan.allowed_token_ids):
+                allowed_token_ids[row_idx, step_idx, : len(candidates)] = torch.tensor(
+                    candidates, dtype=torch.long, device=device
+                )
+
+        tensors = {
+            **teacher_tensors,
+            "pa_opd_probe_responses": padded_responses,
+            "pa_opd_probe_response_mask": response_mask,
+            # Compatibility placeholders: direct mode overrides this legacy
+            # one-token gate in the actor with its constrained sequence gate.
+            "pa_opd_probe_allowed_token_ids": allowed_token_ids,
+        }
+        non_tensors = {"pa_opd_teacher_probe_multi_modal_inputs": teacher_multi_modal}
+        return DataProto.from_dict(tensors=tensors, non_tensors=non_tensors), {
+            "pa_opd/probe_batch_size": float(len(teacher_records)),
+            "pa_opd/probe_target_token_count": float(response_mask.sum().item()),
+        }
     def _build_pa_opd_probe_batch(
         self, batch: DataProto, teacher_messages_list: list[list[dict]], device: torch.device
     ) -> tuple[DataProto, dict[str, float]]:
-        """Build pre-rollout Student/Teacher answer probes aligned with each response."""
+        """Build the pre-rollout Teacher-only first-option-token probe."""
         cfg = self.config.actor_rollout_ref.actor.self_distillation
-        student_records = []
         teacher_records = []
+        if cfg.get("pa_opd_direct_answer", False):
+            return self._build_pa_opd_direct_probe_batch(batch, teacher_messages_list, device)
         candidate_rows = []
         gt_indices = []
         probe_responses = []
@@ -1372,47 +1463,31 @@ class RayPPOTrainer:
             if answer is None and extra_info[idx] is not None and isinstance(extra_info[idx], dict):
                 answer = extra_info[idx].get("answer")
             gt_index = normalize_option_label(answer, cfg.pa_opd_option_labels)
-            student_messages = list(batch.non_tensor_batch["raw_prompt"][idx])
-            student_candidates = self._pa_opd_probe_candidate_token_ids(student_messages)
             teacher_candidates = self._pa_opd_probe_candidate_token_ids(teacher_messages)
-            if not torch.equal(student_candidates, teacher_candidates):
-                raise ValueError("PA-OPD probe candidate token ids differ between Student and Teacher prompts.")
-            response = student_candidates[gt_index].reshape(1)
+            response = teacher_candidates[gt_index].reshape(1)
             response_mask = torch.ones_like(response)
             probe_kwargs = {"pa_opd_answer_probe": True}
-            student_records.append(
-                self._build_teacher_prompt_inputs(
-                    student_messages, response, response_mask, cfg.max_reprompt_len, probe_kwargs
-                )
-            )
             teacher_records.append(
                 self._build_teacher_prompt_inputs(
                     teacher_messages, response, response_mask, cfg.max_reprompt_len, probe_kwargs
                 )
             )
-            candidate_rows.append(student_candidates)
+            candidate_rows.append(teacher_candidates)
             gt_indices.append(gt_index)
             probe_responses.append(response)
 
-        student_tensors, student_multi_modal = self._pad_pa_opd_prompt_inputs(
-            "pa_opd_student_probe", student_records, device
-        )
         teacher_tensors, teacher_multi_modal = self._pad_pa_opd_prompt_inputs(
             "pa_opd_teacher_probe", teacher_records, device
         )
         tensors = {
-            **student_tensors,
             **teacher_tensors,
             "pa_opd_probe_responses": torch.stack(probe_responses).to(device),
             "pa_opd_candidate_token_ids": torch.stack(candidate_rows).to(device),
             "pa_opd_gt_option_indices": torch.tensor(gt_indices, dtype=torch.long, device=device),
         }
-        non_tensors = {
-            "pa_opd_student_probe_multi_modal_inputs": student_multi_modal,
-            "pa_opd_teacher_probe_multi_modal_inputs": teacher_multi_modal,
-        }
+        non_tensors = {"pa_opd_teacher_probe_multi_modal_inputs": teacher_multi_modal}
         return DataProto.from_dict(tensors=tensors, non_tensors=non_tensors), {
-            "pa_opd/probe_batch_size": float(len(student_records)),
+            "pa_opd/probe_batch_size": float(len(teacher_records)),
         }
 
     def _collect_solutions_by_uid(self, batch: DataProto, reward_tensor: torch.Tensor, success_reward_threshold: float) -> dict[Any, list[int]]:
@@ -1657,7 +1732,11 @@ class RayPPOTrainer:
                         )
                     teacher_images = self._extract_images_from_messages(raw_prompt_messages)
 
-                if pa_opd_enabled:
+                if teacher_prompt_messages is not None:
+                    teacher_messages = self._prepare_teacher_messages(
+                        raw_prompt_messages, teacher_images, teacher_prompt_messages=teacher_prompt_messages
+                    )
+                elif pa_opd_enabled:
                     teacher_messages = self._prepare_global_plus_crop_teacher_messages(
                         raw_prompt_messages, teacher_images
                     )
@@ -1774,14 +1853,6 @@ class RayPPOTrainer:
             }
             non_tensors = {"teacher_multi_modal_inputs": teacher_multi_modal_inputs_list}
             if pa_opd_enabled:
-                non_tensors["pa_opd_tag_token_ids"] = [self._pa_opd_tag_token_ids()] * batch_size
-                non_tensors["pa_opd_response_texts"] = [
-                    self.tokenizer.decode(
-                        responses[i, : int(response_mask[i].sum().item())].detach().cpu().tolist(),
-                        skip_special_tokens=False,
-                    )
-                    for i in range(batch_size)
-                ]
                 probe_batch, probe_metrics = self._build_pa_opd_probe_batch(
                     batch, teacher_messages_list, device
                 )
@@ -2456,9 +2527,15 @@ class RayPPOTrainer:
         # load dataloader,
         # TODO: from remote not implemented yet
         dataloader_local_path = os.path.join(global_step_folder, "data.pt")
-        if os.path.exists(dataloader_local_path):
+        resume_dataloader_state = self.config.trainer.get("resume_dataloader_state", True)
+        if os.path.exists(dataloader_local_path) and resume_dataloader_state:
             dataloader_state_dict = torch.load(dataloader_local_path, weights_only=False)
             self.train_dataloader.load_state_dict(dataloader_state_dict)
+        elif os.path.exists(dataloader_local_path):
+            print(
+                "Skipping saved dataloader state because "
+                "trainer.resume_dataloader_state=false; starting the next epoch from the dataset beginning."
+            )
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
@@ -2996,7 +3073,10 @@ class RayPPOTrainer:
                         skip_advantage_for_vopd = (
                             self_distillation_cfg is not None
                             and loss_mode == "vopd"
-                            and not self_distillation_cfg.get("pa_opd_enabled", False)
+                            and (
+                                not self_distillation_cfg.get("pa_opd_enabled", False)
+                                or self_distillation_cfg.get("pa_opd_reward_free", False)
+                            )
                         )
                         if skip_advantage_for_vopd and "self_distillation_mask" in batch.batch.keys():
                             skip_advantage_for_vopd = bool(torch.all(batch.batch["self_distillation_mask"] > 0.5).item())

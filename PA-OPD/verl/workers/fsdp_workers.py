@@ -151,9 +151,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         self.config = config
         # Set for every worker role. Actor workers replace it with the
-        # model-only EMA-teacher manager when PA-OPD requires one; standalone
+        # model-only EMA-teacher manager when legacy VOPD requires one; standalone
         # rollout workers keep it as ``None`` during actor checkpoint loads.
-        self.pa_opd_teacher_checkpoint_manager = None
+        self.ema_teacher_checkpoint_manager = None
         import torch.distributed
 
         if not torch.distributed.is_initialized():
@@ -943,32 +943,52 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 processing_class=self.processor if self.processor is not None else self.tokenizer,
                 checkpoint_config=self.config.actor.checkpoint,
             )
-            # PA-OPD's legacy EMA teacher reuses ``ref_module_fsdp`` and is
-            # updated after every actor optimizer step. The regular actor
-            # checkpoint above deliberately owns only the student model,
-            # optimizer, scheduler, and RNG. Persist the teacher separately
-            # so resuming does not silently reset it to the base reference
-            # checkpoint and change the privileged supervision distribution.
-            self.pa_opd_teacher_checkpoint_manager = None
+            # The original legacy VOPD EMA teacher reuses ``ref_module_fsdp``.
+            # With actor KL, that module must remain frozen as the KL reference,
+            # so PA-OPD can explicitly construct a fixed-initialized, separately
+            # sharded EMA teacher instead. Persist either EMA teacher separately
+            # from the student checkpoint for strict resume semantics.
+            self.ema_teacher_checkpoint_manager = None
             self_distillation_cfg = self.config.actor.get("self_distillation", None)
-            if (
+            teacher_model_source = (
+                self_distillation_cfg.get("teacher_model_source", "legacy")
+                if self_distillation_cfg is not None
+                else None
+            )
+            fixed_teacher_ema = bool(
+                self_distillation_cfg.get("fixed_teacher_ema", False)
+                if self_distillation_cfg is not None
+                else False
+            )
+            uses_ema_teacher = (
                 self_distillation_cfg is not None
                 and self.config.actor.policy_loss.get("loss_mode", "vanilla") == "vopd"
-                and self_distillation_cfg.get("pa_opd_enabled", False)
-                and self_distillation_cfg.get("teacher_model_source", "legacy") == "legacy"
-                and self_distillation_cfg.get("teacher_regularization", "ema") in {"ema", "progressive"}
-            ):
-                if not hasattr(self, "ref_module_fsdp"):
-                    raise RuntimeError("PA-OPD EMA teacher requires ref_module_fsdp for checkpointing.")
-                self.pa_opd_teacher_checkpoint_manager = FSDPCheckpointManager(
-                    model=self.ref_module_fsdp,
+                and (
+                    (
+                        teacher_model_source == "legacy"
+                        and self_distillation_cfg.get("teacher_regularization", "ema") in {"ema", "progressive"}
+                    )
+                    or (teacher_model_source == "fixed" and fixed_teacher_ema)
+                )
+            )
+            if uses_ema_teacher:
+                if teacher_model_source == "legacy":
+                    if not hasattr(self, "ref_module_fsdp"):
+                        raise RuntimeError("VOPD EMA teacher requires ref_module_fsdp for checkpointing.")
+                    ema_teacher_model = self.ref_module_fsdp
+                else:
+                    if not hasattr(self, "teacher_module_fsdp"):
+                        raise RuntimeError("fixed_teacher_ema requires teacher_module_fsdp for checkpointing.")
+                    ema_teacher_model = self.teacher_module_fsdp
+                self.ema_teacher_checkpoint_manager = FSDPCheckpointManager(
+                    model=ema_teacher_model,
                     optimizer=None,
                     lr_scheduler=None,
                     processing_class=None,
                     checkpoint_config={"load_contents": ["model"], "save_contents": ["model"]},
                 )
                 if self.rank == 0:
-                    print("PA-OPD strict resume: EMA teacher checkpointing is enabled.")
+                    print("VOPD strict resume: EMA teacher checkpointing is enabled.")
 
         if not self._is_actor and self._is_rollout:
             # If ActorRolloutRefWorker is initialized as a standalone rollout,
@@ -1180,9 +1200,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         )
         dist.barrier()
 
-        if self.pa_opd_teacher_checkpoint_manager is not None:
+        if self.ema_teacher_checkpoint_manager is not None:
             teacher_local_path = os.path.join(local_path, "teacher")
-            self.pa_opd_teacher_checkpoint_manager.save_checkpoint(
+            self.ema_teacher_checkpoint_manager.save_checkpoint(
                 local_path=teacher_local_path,
                 hdfs_path=None,
                 global_step=global_step,
@@ -1190,7 +1210,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
             dist.barrier()
             if self.rank == 0:
-                print(f"Saved PA-OPD EMA teacher checkpoint to: {teacher_local_path}")
+                print(f"Saved VOPD EMA teacher checkpoint to: {teacher_local_path}")
 
         if self._is_lora and hasattr(getattr(self, "actor_module", self.actor_module_fsdp), "peft_config"):
             lora_save_path = os.path.join(local_path, "lora_adapter")
@@ -1248,24 +1268,24 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             local_path=local_path, hdfs_path=hdfs_path, del_local_after_load=del_local_after_load
         )
 
-        if self.pa_opd_teacher_checkpoint_manager is not None:
+        if self.ema_teacher_checkpoint_manager is not None:
             teacher_local_path = os.path.join(local_path, "teacher")
             teacher_shard_path = os.path.join(
                 teacher_local_path, f"model_world_size_{self.world_size}_rank_{self.rank}.pt"
             )
             if not os.path.isfile(teacher_shard_path):
                 raise FileNotFoundError(
-                    "Strict PA-OPD resume requires the EMA teacher checkpoint, but it is missing: "
+                    "Strict VOPD resume requires the EMA teacher checkpoint, but it is missing: "
                     f"{teacher_shard_path}. Use a checkpoint produced by the updated PA-OPD code, "
                     "or start a new run instead of resuming this legacy checkpoint."
                 )
-            self.pa_opd_teacher_checkpoint_manager.load_checkpoint(
+            self.ema_teacher_checkpoint_manager.load_checkpoint(
                 local_path=teacher_local_path,
                 hdfs_path=None,
                 del_local_after_load=del_local_after_load,
             )
             if self.rank == 0:
-                print(f"Loaded PA-OPD EMA teacher checkpoint from: {teacher_local_path}")
+                print(f"Loaded VOPD EMA teacher checkpoint from: {teacher_local_path}")
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)

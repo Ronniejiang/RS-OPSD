@@ -66,6 +66,7 @@ class SelfDistillationConfig(BaseConfig):
         teacher_always_on (bool): Whether to distill every sample directly from a teacher input instead of selecting successful samples by reward.
         teacher_model_source (str): Teacher source. Options: "legacy", "current" or "fixed".
         teacher_model_path (Optional[str]): Fixed teacher model path when teacher_model_source="fixed".
+        fixed_teacher_ema (bool): When true, a fixed-initialized teacher is updated by EMA; this keeps a KL reference frozen.
         teacher_image_key (Optional[str]): Dataset column holding teacher-side images for multimodal distillation.
         teacher_extra_student_image_blocks (int): If positive, teacher-side images are replaced with the
             student's prompt images plus this many repeated copies of those same student images.
@@ -119,6 +120,8 @@ class SelfDistillationConfig(BaseConfig):
     teacher_always_on: bool = False
     teacher_model_source: str = "legacy"
     teacher_model_path: Optional[str] = None
+    # Opt-in only: retain a distinct EMA privileged teacher when a frozen ref is used for KL.
+    fixed_teacher_ema: bool = False
     teacher_image_key: Optional[str] = None
     teacher_extra_student_image_blocks: int = 0
     contrastive_visual_advantage: bool = False
@@ -139,8 +142,13 @@ class SelfDistillationConfig(BaseConfig):
 
     teacher_input_mode: str = "crop_only"
     pa_opd_enabled: bool = False
-    pa_opd_option_labels: list[str] = field(default_factory=lambda: ["A", "B", "C", "D"])
-    pa_opd_format_rlvr_coef: float = 0.1
+    # Direct RS_OPD recipe: no <think> tags, no format reward, and a
+    # constrained multi-token GT reliability probe for option sets.
+    pa_opd_direct_answer: bool = False
+    pa_opd_reward_free: bool = False
+    # Optional GT-safe top-k JSD augmentation for direct PA-OPDVR.
+    pa_opd_topk_jsd_enabled: bool = False
+    pa_opd_topk_jsd_coef: float = 1.0
 
     def __post_init__(self):
         if not 0.0 <= self.alpha <= 1.0:
@@ -182,23 +190,50 @@ class SelfDistillationConfig(BaseConfig):
                 "self_distillation.teacher_extra_student_image_blocks must be non-negative, "
                 f"got {self.teacher_extra_student_image_blocks}"
             )
-        if self.teacher_input_mode not in {"crop_only", "global_plus_crop"}:
+        valid_teacher_input_modes = {"crop_only", "global_plus_crop", "global_plus_derived_plus_crop"}
+        if self.teacher_input_mode not in valid_teacher_input_modes:
             raise ValueError(
-                "self_distillation.teacher_input_mode must be 'crop_only' or 'global_plus_crop', "
+                "self_distillation.teacher_input_mode must be one of "
+                f"{sorted(valid_teacher_input_modes)}, "
                 f"got {self.teacher_input_mode!r}"
             )
         if self.pa_opd_enabled:
-            if self.teacher_input_mode != "global_plus_crop":
-                raise ValueError("PA-OPD requires teacher_input_mode='global_plus_crop'.")
+            if self.teacher_input_mode not in {"global_plus_crop", "global_plus_derived_plus_crop"}:
+                raise ValueError(
+                    "PA-OPD requires teacher_input_mode='global_plus_crop' or "
+                    "'global_plus_derived_plus_crop'."
+                )
             if self.contrastive_visual_advantage:
                 raise ValueError("PA-OPD and contrastive_visual_advantage cannot be enabled together.")
-            if not self.pa_opd_option_labels:
-                raise ValueError("PA-OPD requires at least one configured option label.")
-            labels = [label.strip().upper() for label in self.pa_opd_option_labels]
-            if len(set(labels)) != len(labels):
-                raise ValueError("PA-OPD option labels must be unique after normalization.")
-        if self.pa_opd_format_rlvr_coef < 0.0:
-            raise ValueError("self_distillation.pa_opd_format_rlvr_coef must be non-negative.")
+            if self.pa_opd_topk_jsd_enabled:
+                if not self.pa_opd_direct_answer:
+                    raise ValueError("PA-OPD top-k JSD requires pa_opd_direct_answer=True.")
+                if not self.full_logit_distillation:
+                    raise ValueError("PA-OPD top-k JSD requires full_logit_distillation=True.")
+                if self.alpha != 0.5:
+                    raise ValueError("PA-OPD top-k JSD requires alpha=0.5.")
+                if self.distillation_topk is None:
+                    raise ValueError("PA-OPD top-k JSD requires distillation_topk.")
+                if not self.distillation_add_tail:
+                    raise ValueError("PA-OPD top-k JSD requires distillation_add_tail=True.")
+                if self.pa_opd_topk_jsd_coef < 0.0:
+                    raise ValueError("PA-OPD top-k JSD coefficient must be non-negative.")
+            else:
+                if self.full_logit_distillation:
+                    raise ValueError("PA-OPDVR requires sampled-token distillation unless top-k JSD is enabled.")
+                if self.alpha != 1.0:
+                    raise ValueError("PA-OPDVR requires alpha=1.0 for sampled-token reverse KL.")
+                if self.distillation_topk is not None:
+                    raise ValueError("PA-OPDVR does not use top-k/full-vocabulary distillation logits.")
+        if self.pa_opd_direct_answer and not self.pa_opd_enabled:
+            raise ValueError("pa_opd_direct_answer requires pa_opd_enabled=True.")
+        if self.pa_opd_reward_free:
+            if not self.pa_opd_enabled:
+                raise ValueError("pa_opd_reward_free requires pa_opd_enabled=True.")
+            if not self.pa_opd_direct_answer:
+                raise ValueError(
+                    "pa_opd_reward_free is reserved for the no-thinking direct PA-OPDVR protocol."
+                )
         valid_contrastive_negative_modes = [
             "no-image",
             "full-blur",
@@ -241,6 +276,11 @@ class SelfDistillationConfig(BaseConfig):
             )
         if self.teacher_model_source == "fixed" and not self.teacher_model_path:
             raise ValueError("self_distillation.teacher_model_path is required when teacher_model_source='fixed'")
+        if self.fixed_teacher_ema:
+            if self.teacher_model_source != "fixed":
+                raise ValueError("self_distillation.fixed_teacher_ema requires teacher_model_source='fixed'")
+            if self.teacher_regularization != "ema":
+                raise ValueError("self_distillation.fixed_teacher_ema requires teacher_regularization='ema'")
         if self.teacher_regularization == "progressive":
             if self.teacher_model_source != "legacy":
                 raise ValueError(

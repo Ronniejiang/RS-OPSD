@@ -31,9 +31,20 @@ from torch.distributed.tensor import DTensor
 
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
-from verl.trainer.ppo.core_algos import agg_loss, compute_self_distillation_loss, get_policy_loss_fn, kl_penalty
-from verl.trainer.ppo.pa_opd import build_strict_reasoning_mask, compute_privileged_advantage, option_probabilities
+from verl.trainer.ppo.core_algos import (
+    agg_loss,
+    compute_opdvr_loss,
+    compute_pa_opd_safe_topk_jsd_loss,
+    compute_self_distillation_loss,
+    get_policy_loss_fn,
+    kl_penalty,
+)
+from verl.trainer.ppo.pa_opd import (
+    compute_teacher_reliability,
+    option_probabilities,
+)
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
+from verl.trainer.ppo.pa_opd_direct import compute_constrained_teacher_reliability
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.metric import AggregationType, Metric, reduce_metrics
@@ -139,9 +150,15 @@ class DataParallelPPOActor(BasePPOActor):
         if not self_distillation_cfg or loss_mode != "vopd":
             return
         teacher_model_source = getattr(self_distillation_cfg, "teacher_model_source", "legacy")
-        if teacher_model_source != "legacy":
+        fixed_teacher_ema = getattr(self_distillation_cfg, "fixed_teacher_ema", False)
+        if teacher_model_source == "fixed":
+            if not fixed_teacher_ema:
+                return
+        elif teacher_model_source != "legacy":
             return
         teacher_regularization = getattr(self_distillation_cfg, "teacher_regularization", "ema")
+        if teacher_model_source == "fixed" and teacher_regularization != "ema":
+            raise ValueError("fixed_teacher_ema requires teacher_regularization='ema'.")
         if self.teacher_module is None or self.teacher_module is self.actor_module:
             raise ValueError("Teacher updates require a separate teacher_module in the actor worker.")
         with torch.no_grad():
@@ -358,6 +375,27 @@ class DataParallelPPOActor(BasePPOActor):
         return visual_encoder.register_forward_hook(hook)
 
     @staticmethod
+    def _merge_topk_support(
+        topk_indices: torch.Tensor,
+        extra_token_ids: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Union Student top-k with mandatory direct-answer grammar tokens."""
+
+        if topk_indices.shape[:2] != extra_token_ids.shape[:2] or extra_token_ids.ndim != 3:
+            raise ValueError("extra top-k token ids must be [batch, response, candidates]")
+        if topk_indices.dtype != torch.long:
+            raise ValueError("top-k token ids must use torch.long")
+        extra_valid = extra_token_ids.ge(0)
+        candidate_ids = torch.cat([topk_indices, extra_token_ids.clamp_min(0)], dim=-1)
+        candidate_valid = torch.cat([torch.ones_like(topk_indices, dtype=torch.bool), extra_valid], dim=-1)
+        sentinel = torch.iinfo(candidate_ids.dtype).max
+        sorted_ids = torch.sort(candidate_ids.masked_fill(~candidate_valid, sentinel), dim=-1).values
+        support_valid = sorted_ids.ne(sentinel)
+        support_valid[..., 1:] &= sorted_ids[..., 1:].ne(sorted_ids[..., :-1])
+        return sorted_ids.masked_fill(~support_valid, 0), support_valid
+
+
+    @staticmethod
     def _add_tail_bucket(log_probs: torch.Tensor) -> torch.Tensor:
         log_s = torch.logsumexp(log_probs, dim=-1, keepdim=True)
         log_s = torch.clamp(log_s, max=-1e-7)
@@ -566,6 +604,7 @@ class DataParallelPPOActor(BasePPOActor):
         calculate_entropy: bool = False,
         return_all_logps: bool = False,
         distill_topk: Optional[int] = None,
+        topk_extra_indices: Optional[torch.Tensor] = None,
         topk_indices: Optional[torch.Tensor] = None,
         module: Optional[nn.Module] = None,
     ) -> dict[str, torch.Tensor]:
@@ -586,6 +625,10 @@ class DataParallelPPOActor(BasePPOActor):
         use_topk = distill_topk is not None or topk_indices is not None
         compute_all_logps = return_all_logps and not use_topk
         return_topk_indices = use_topk and topk_indices is None
+        if topk_extra_indices is not None and (distill_topk is None or topk_indices is not None):
+            raise ValueError("extra top-k support requires a Student distillation_topk forward.")
+        if topk_extra_indices is not None and self.use_remove_padding:
+            raise ValueError("extra top-k support requires use_remove_padding=False.")
         if (return_all_logps or use_topk) and self.use_fused_kernels:
             raise ValueError("Logit distillation requires disabling fused kernels.")
 
@@ -998,6 +1041,11 @@ class DataParallelPPOActor(BasePPOActor):
                         if topk_indices is None:
                             topk = min(distill_topk, logits.size(-1))
                             topk_logits, topk_indices = torch.topk(logits, topk, dim=-1)
+                            if topk_extra_indices is not None:
+                                topk_indices, topk_valid_mask = self._merge_topk_support(
+                                    topk_indices, topk_extra_indices.to(device=logits.device, dtype=torch.long)
+                                )
+                                topk_logits = torch.gather(logits, dim=-1, index=topk_indices)
                         else:
                             topk_logits = torch.gather(logits, dim=-1, index=topk_indices)
                         logsumexp = torch.logsumexp(logits, dim=-1, keepdim=True)
@@ -1026,6 +1074,8 @@ class DataParallelPPOActor(BasePPOActor):
                 outputs["topk_logps"] = topk_logps
                 if return_topk_indices:
                     outputs["topk_indices"] = topk_indices
+                if topk_extra_indices is not None:
+                    outputs["topk_valid_mask"] = topk_valid_mask
             return outputs
 
     def _optimizer_step(self):
@@ -1154,10 +1204,14 @@ class DataParallelPPOActor(BasePPOActor):
         self_distillation_enabled = loss_mode == "vopd"
         self_distillation_cfg = getattr(self.config, "self_distillation", None)
         pa_opd_enabled = False
+        pa_opd_direct_answer = False
+        pa_opd_topk_jsd_enabled = False
         if self_distillation_enabled:
             if self_distillation_cfg is None:
                 raise ValueError(f"loss_mode={loss_mode} requires actor.self_distillation config.")
             pa_opd_enabled = bool(self_distillation_cfg.get("pa_opd_enabled", False))
+            pa_opd_topk_jsd_enabled = bool(self_distillation_cfg.get("pa_opd_topk_jsd_enabled", False))
+            pa_opd_direct_answer = bool(self_distillation_cfg.get("pa_opd_direct_answer", False))
             self_distillation_required_keys = {
                 "teacher_input_ids",
                 "teacher_attention_mask",
@@ -1177,20 +1231,27 @@ class DataParallelPPOActor(BasePPOActor):
             if pa_opd_enabled:
                 self_distillation_required_keys.update(
                     {
-                        "pa_opd_student_probe_input_ids",
-                        "pa_opd_student_probe_attention_mask",
-                        "pa_opd_student_probe_position_ids",
-                        "pa_opd_student_probe_response_start_idx",
+                        "pa_opd_semantic_token_mask",
+                        "pa_opd_answer_token_mask",
+                        "pa_opd_trajectory_correct",
                         "pa_opd_teacher_probe_input_ids",
                         "pa_opd_teacher_probe_attention_mask",
                         "pa_opd_teacher_probe_position_ids",
                         "pa_opd_teacher_probe_response_start_idx",
                         "pa_opd_probe_responses",
-                        "pa_opd_candidate_token_ids",
-                        "pa_opd_gt_option_indices",
                     }
                 )
+            if pa_opd_enabled and pa_opd_direct_answer:
+                self_distillation_required_keys.update(
+                    {"pa_opd_probe_response_mask", "pa_opd_probe_allowed_token_ids"}
+                )
+                if pa_opd_topk_jsd_enabled:
+                    self_distillation_required_keys.update(
+                        {"pa_opd_jsd_target_token_ids", "pa_opd_jsd_allowed_token_ids", "pa_opd_jsd_prefix_mask"}
+                    )
             assert self_distillation_required_keys.issubset(set(data.batch.keys())), f"Missing required keys: {self_distillation_required_keys - set(data.batch.keys())}"
+
+
 
         select_keys = [
             "responses",
@@ -1233,14 +1294,7 @@ class DataParallelPPOActor(BasePPOActor):
         if has_negative_teacher_multi_modal_inputs:
             non_tensor_select_keys.append("negative_teacher_multi_modal_inputs")
         if pa_opd_enabled:
-            non_tensor_select_keys.extend(
-                [
-                    "pa_opd_student_probe_multi_modal_inputs",
-                    "pa_opd_teacher_probe_multi_modal_inputs",
-                    "pa_opd_tag_token_ids",
-                    "pa_opd_response_texts",
-                ]
-            )
+            non_tensor_select_keys.append("pa_opd_teacher_probe_multi_modal_inputs")
         if self.use_prefix_grouper and "uid" in data.non_tensor_batch.keys():
             non_tensor_select_keys.append("uid")
 
@@ -1258,10 +1312,11 @@ class DataParallelPPOActor(BasePPOActor):
         }
         if self_distillation_enabled:
             metrics["actor/grpo_loss"] = 0.0
-            metrics["actor/vopd_loss"] = 0.0
-            metrics["actor/vopd_loss_weighted"] = 0.0
             if pa_opd_enabled:
-                metrics["actor/format_rlvr_loss_weighted"] = 0.0
+                metrics["actor/opdvr_loss"] = 0.0
+            else:
+                metrics["actor/vopd_loss"] = 0.0
+                metrics["actor/vopd_loss_weighted"] = 0.0
         distill_dump_chunks = []
         visual_advantage_dump_chunks = []
         stage_wall_time_totals = None
@@ -1323,6 +1378,9 @@ class DataParallelPPOActor(BasePPOActor):
                     # all return: (bsz, response_length)
                     return_all_logps = self_distillation_cfg.full_logit_distillation and not self_distillation_cfg.distillation_topk
                     distill_topk = self_distillation_cfg.distillation_topk if self_distillation_cfg.full_logit_distillation else None
+                    topk_extra_indices = (
+                        model_inputs["pa_opd_jsd_allowed_token_ids"] if pa_opd_topk_jsd_enabled else None
+                    )
                     student_forward_start = time.perf_counter()
                     outputs = self._forward_micro_batch(
                         model_inputs,
@@ -1330,6 +1388,7 @@ class DataParallelPPOActor(BasePPOActor):
                         calculate_entropy=calculate_entropy,
                         return_all_logps=return_all_logps,
                         distill_topk=distill_topk,
+                        topk_extra_indices=topk_extra_indices,
                     )
                     if self_distillation_enabled:
                         student_forward_time = time.perf_counter() - student_forward_start
@@ -1337,6 +1396,7 @@ class DataParallelPPOActor(BasePPOActor):
                     log_prob = outputs["log_probs"]
                     entropy = outputs["entropys"] if calculate_entropy else None
                     student_all_logps = outputs.get("all_logps") if return_all_logps else None
+                    student_topk_valid_mask = outputs.get("topk_valid_mask") if pa_opd_topk_jsd_enabled else None
                     student_topk_logps = outputs.get("topk_logps") if distill_topk else None
                     student_topk_indices = outputs.get("topk_indices") if distill_topk else None
 
@@ -1387,15 +1447,14 @@ class DataParallelPPOActor(BasePPOActor):
                         teacher_all_logps = teacher_outputs.get("all_logps") if return_all_logps else None
                         teacher_topk_logps = teacher_outputs.get("topk_logps") if distill_topk else None
                         visual_advantage_weights = None
+                        # Standard Vision-OPD (including forced-think OPSD)
+                        # distils every generated response token. In particular,
+                        # this intentionally includes the <answer>...</answer>
+                        # payload; only PA-OPDVR below replaces it with a
+                        # semantic answer mask.
                         distillation_response_mask = response_mask
+                        teacher_reliable = None
                         if pa_opd_enabled:
-                            student_probe_inputs = {
-                                "responses": model_inputs["pa_opd_probe_responses"],
-                                "input_ids": model_inputs["pa_opd_student_probe_input_ids"],
-                                "attention_mask": model_inputs["pa_opd_student_probe_attention_mask"],
-                                "position_ids": model_inputs["pa_opd_student_probe_position_ids"],
-                                "response_start_idx": model_inputs["pa_opd_student_probe_response_start_idx"],
-                            }
                             teacher_probe_inputs = {
                                 "responses": model_inputs["pa_opd_probe_responses"],
                                 "input_ids": model_inputs["pa_opd_teacher_probe_input_ids"],
@@ -1403,23 +1462,12 @@ class DataParallelPPOActor(BasePPOActor):
                                 "position_ids": model_inputs["pa_opd_teacher_probe_position_ids"],
                                 "response_start_idx": model_inputs["pa_opd_teacher_probe_response_start_idx"],
                             }
-                            if "pa_opd_student_probe_multi_modal_inputs" in model_inputs:
-                                student_probe_inputs["multi_modal_inputs"] = model_inputs[
-                                    "pa_opd_student_probe_multi_modal_inputs"
-                                ]
                             if "pa_opd_teacher_probe_multi_modal_inputs" in model_inputs:
                                 teacher_probe_inputs["multi_modal_inputs"] = model_inputs[
                                     "pa_opd_teacher_probe_multi_modal_inputs"
                                 ]
                             with torch.no_grad():
                                 probe_start = time.perf_counter()
-                                student_probe_outputs = self._forward_micro_batch(
-                                    student_probe_inputs,
-                                    temperature=temperature,
-                                    calculate_entropy=False,
-                                    return_all_logps=True,
-                                    distill_topk=None,
-                                )
                                 teacher_probe_outputs = self._forward_micro_batch(
                                     teacher_probe_inputs,
                                     temperature=temperature,
@@ -1431,46 +1479,35 @@ class DataParallelPPOActor(BasePPOActor):
                                 stage_wall_time_totals["timing_s/update_actor/pa_opd_probe"] += (
                                     time.perf_counter() - probe_start
                                 )
-                            student_option_probs = option_probabilities(
-                                student_probe_outputs["all_logps"][:, 0, :],
-                                model_inputs["pa_opd_candidate_token_ids"],
-                            )
-                            teacher_option_probs = option_probabilities(
-                                teacher_probe_outputs["all_logps"][:, 0, :],
-                                model_inputs["pa_opd_candidate_token_ids"],
-                            )
-                            pa_opd_sample_weights, teacher_correct = compute_privileged_advantage(
-                                teacher_option_probs,
-                                student_option_probs,
-                                model_inputs["pa_opd_gt_option_indices"],
-                            )
-                            tag_token_ids = model_inputs["pa_opd_tag_token_ids"][0]
-                            distillation_response_mask, valid_reasoning_format = build_strict_reasoning_mask(
-                                model_inputs["responses"],
-                                response_mask,
-                                open_think_token_ids=tag_token_ids["<think>"],
-                                close_think_token_ids=tag_token_ids["</think>"],
-                                open_answer_token_ids=tag_token_ids["<answer>"],
-                                close_answer_token_ids=tag_token_ids["</answer>"],
-                                response_texts=model_inputs["pa_opd_response_texts"],
-                            )
-                            visual_advantage_weights = pa_opd_sample_weights.unsqueeze(1).expand_as(
-                                distillation_response_mask
-                            )
-                            gt_indices = model_inputs["pa_opd_gt_option_indices"].long()
-                            teacher_gt = teacher_option_probs.gather(1, gt_indices.unsqueeze(1)).squeeze(1)
-                            student_gt = student_option_probs.gather(1, gt_indices.unsqueeze(1)).squeeze(1)
+                            if pa_opd_direct_answer:
+                                teacher_reliable, teacher_gt = compute_constrained_teacher_reliability(
+                                    teacher_probe_outputs["all_logps"],
+                                    model_inputs["pa_opd_probe_responses"],
+                                    model_inputs["pa_opd_probe_response_mask"],
+                                    model_inputs["pa_opd_probe_allowed_token_ids"],
+                                )
+                                micro_batch_metrics["pa_opd/direct_constrained_probe"] = 1.0
+                            else:
+                                teacher_option_probs = option_probabilities(
+                                    teacher_probe_outputs["all_logps"][:, 0, :],
+                                    model_inputs["pa_opd_candidate_token_ids"],
+                                )
+                                teacher_reliable, teacher_gt = compute_teacher_reliability(
+                                    teacher_option_probs,
+                                    model_inputs["pa_opd_gt_option_indices"],
+                                )
+                            distillation_response_mask = model_inputs["pa_opd_semantic_token_mask"]
+                            valid_semantic_rows = distillation_response_mask.sum(dim=-1) > 0
                             micro_batch_metrics.update(
                                 {
-                                    "pa_opd/teacher_gt_accuracy": teacher_correct.float().mean().item(),
+                                    "pa_opd/teacher_gt_accuracy": teacher_reliable.float().mean().item(),
                                     "pa_opd/teacher_gt_probability": teacher_gt.mean().item(),
-                                    "pa_opd/student_gt_probability": student_gt.mean().item(),
-                                    "pa_opd/privileged_advantage_mean": pa_opd_sample_weights.mean().item(),
-                                    "pa_opd/privileged_advantage_nonzero_fraction": (
-                                        pa_opd_sample_weights > 0
-                                    ).float().mean().item(),
-                                    "pa_opd/valid_reasoning_format_fraction": valid_reasoning_format.float().mean().item(),
-                                    "pa_opd/reasoning_token_count": distillation_response_mask.sum().item(),
+                                    "pa_opd/teacher_reliable_fraction": teacher_reliable.float().mean().item(),
+                                    "pa_opd/valid_semantic_format_fraction": valid_semantic_rows.float().mean().item(),
+                                    "pa_opd/semantic_token_count": distillation_response_mask.sum().item(),
+                                    "pa_opd/answer_token_count": model_inputs[
+                                        "pa_opd_answer_token_mask"
+                                    ].sum().item(),
                                 }
                             )
                         if self_distillation_cfg.get("contrastive_visual_advantage", False):
@@ -1545,57 +1582,77 @@ class DataParallelPPOActor(BasePPOActor):
                                     }
                                 )
                         loss_compute_start = time.perf_counter()
-                        pa_opd_loss_normalization = pa_opd_enabled
-                        vopd_loss, vopd_metrics = compute_self_distillation_loss(
-                            student_log_probs=log_prob,
-                            teacher_log_probs=teacher_log_prob,
-                            response_mask=distillation_response_mask,
-                            self_distillation_config=self_distillation_cfg,
-                            old_log_probs=old_log_prob,
-                            student_all_log_probs=student_all_logps,
-                            teacher_all_log_probs=teacher_all_logps,
-                            student_topk_log_probs=student_topk_logps,
-                            teacher_topk_log_probs=teacher_topk_logps,
-                            self_distillation_mask=self_distillation_mask,
-                            visual_advantage_weights=visual_advantage_weights,
-                            loss_agg_mode=loss_agg_mode,
-                            rollout_is_weights=rollout_is_weights,
-                            batch_num_tokens=(
-                                None if pa_opd_loss_normalization else self.config.global_batch_info.get("batch_num_tokens")
-                            ),
-                            global_batch_size=(
-                                None if pa_opd_loss_normalization else self.config.global_batch_info.get("global_batch_size")
-                            ),
-                            loss_scale_factor=(
-                                None if pa_opd_loss_normalization else self.config.global_batch_info.get("loss_scale_factor")
-                            ),
-                        )
+                        if pa_opd_enabled:
+                            if teacher_reliable is None:
+                                raise RuntimeError("PA-OPDVR Teacher reliability probe was not computed.")
+                            vopd_loss, vopd_metrics = compute_opdvr_loss(
+                                student_log_probs=log_prob,
+                                teacher_log_probs=teacher_log_prob,
+                                semantic_token_mask=distillation_response_mask,
+                                trajectory_correct=model_inputs["pa_opd_trajectory_correct"],
+                                teacher_reliable=teacher_reliable,
+                                self_distillation_config=self_distillation_cfg,
+                                teacher_present_mask=self_distillation_mask,
+                                old_log_probs=old_log_prob,
+                                rollout_is_weights=rollout_is_weights,
+                                loss_agg_mode=loss_agg_mode,
+                            )
+                            if pa_opd_topk_jsd_enabled:
+                                if any(
+                                    item is None
+                                    for item in (student_topk_logps, student_topk_indices, student_topk_valid_mask, teacher_topk_logps)
+                                ):
+                                    raise RuntimeError("PA-OPD top-k JSD is missing shared Student/Teacher logits.")
+                                jsd_loss, jsd_metrics = compute_pa_opd_safe_topk_jsd_loss(
+                                    student_topk_log_probs=student_topk_logps,
+                                    teacher_topk_log_probs=teacher_topk_logps,
+                                    topk_token_ids=student_topk_indices,
+                                    topk_valid_mask=student_topk_valid_mask,
+                                    target_token_ids=model_inputs["pa_opd_jsd_target_token_ids"],
+                                    allowed_token_ids=model_inputs["pa_opd_jsd_allowed_token_ids"],
+                                    prefix_mask=model_inputs["pa_opd_jsd_prefix_mask"],
+                                    teacher_reliable=teacher_reliable,
+                                    self_distillation_config=self_distillation_cfg,
+                                    teacher_present_mask=self_distillation_mask,
+                                    student_log_probs=log_prob,
+                                    old_log_probs=old_log_prob,
+                                    rollout_is_weights=rollout_is_weights,
+                                    loss_agg_mode=loss_agg_mode,
+                                )
+                                jsd_coef = self_distillation_cfg.get("pa_opd_topk_jsd_coef", 1.0)
+                                vopd_metrics.update(jsd_metrics)
+                                vopd_metrics["actor/opdvr_sampled_loss"] = vopd_loss.detach().item()
+                                vopd_metrics["actor/topk_jsd_loss"] = jsd_loss.detach().item()
+                                vopd_metrics["actor/topk_jsd_coef"] = jsd_coef
+                                vopd_loss = vopd_loss + jsd_coef * jsd_loss
+                        else:
+                            vopd_loss, vopd_metrics = compute_self_distillation_loss(
+                                student_log_probs=log_prob,
+                                teacher_log_probs=teacher_log_prob,
+                                response_mask=distillation_response_mask,
+                                self_distillation_config=self_distillation_cfg,
+                                old_log_probs=old_log_prob,
+                                student_all_log_probs=student_all_logps,
+                                teacher_all_log_probs=teacher_all_logps,
+                                student_topk_log_probs=student_topk_logps,
+                                teacher_topk_log_probs=teacher_topk_logps,
+                                self_distillation_mask=self_distillation_mask,
+                                visual_advantage_weights=visual_advantage_weights,
+                                loss_agg_mode=loss_agg_mode,
+                                rollout_is_weights=rollout_is_weights,
+                                batch_num_tokens=self.config.global_batch_info.get("batch_num_tokens"),
+                                global_batch_size=self.config.global_batch_info.get("global_batch_size"),
+                                loss_scale_factor=self.config.global_batch_info.get("loss_scale_factor"),
+                            )
                         loss_compute_time = time.perf_counter() - loss_compute_start
                         stage_wall_time_totals["timing_s/update_actor/loss_compute"] += loss_compute_time
-
-                        vopd_metrics["self_distillation/empty_target_batch"] = self_distillation_mask.sum().item() == 0
                         micro_batch_metrics.update(vopd_metrics)
 
                         if pa_opd_enabled:
-                            if advantages is None:
-                                raise ValueError("PA-OPD Format-RLVR requires GRPO advantages.")
-                            policy_loss_fn = get_policy_loss_fn("vanilla")
-                            grpo_loss, grpo_metrics = policy_loss_fn(
-                                old_log_prob=old_log_prob,
-                                log_prob=log_prob,
-                                advantages=advantages,
-                                response_mask=response_mask,
-                                loss_agg_mode=loss_agg_mode,
-                                config=self.config,
-                                rollout_is_weights=rollout_is_weights,
-                            )
-                            format_coef = self_distillation_cfg.get("pa_opd_format_rlvr_coef", 0.1)
-                            pg_loss = vopd_loss + format_coef * grpo_loss
-                            micro_batch_metrics["actor/format_rlvr_loss"] = grpo_loss.detach().item()
-                            micro_batch_metrics["actor/format_rlvr_coef"] = format_coef
-                            micro_batch_metrics.update(
-                                {f"actor/format_rlvr/{key.split('/', 1)[1]}": value for key, value in grpo_metrics.items()}
-                            )
+                            # The retained direct protocol is reward-free: its policy
+                            # gradient is exactly OPDVR (plus optional native KL/JSD).
+                            grpo_loss = None
+                            pg_loss = vopd_loss
                         elif policy_fallback_mask is not None and policy_fallback_mask.any().item():
                             if advantages is None:
                                 raise ValueError(
@@ -1684,12 +1741,13 @@ class DataParallelPPOActor(BasePPOActor):
 
                     metrics["actor/pg_loss"] += pg_loss.detach().item() * loss_scale_factor
                     if self_distillation_enabled:
-                        metrics["actor/vopd_loss"] += vopd_loss.detach().item() * loss_scale_factor
-                        metrics["actor/vopd_loss_weighted"] += vopd_loss.detach().item() * loss_scale_factor
+                        if pa_opd_enabled:
+                            metrics["actor/opdvr_loss"] += vopd_loss.detach().item() * loss_scale_factor
+                        else:
+                            metrics["actor/vopd_loss"] += vopd_loss.detach().item() * loss_scale_factor
+                            metrics["actor/vopd_loss_weighted"] += vopd_loss.detach().item() * loss_scale_factor
                         if grpo_loss is not None:
                             metrics["actor/grpo_loss"] += grpo_loss.detach().item() * loss_scale_factor
-                            if pa_opd_enabled:
-                                metrics["actor/format_rlvr_loss_weighted"] += grpo_loss.detach().item() * loss_scale_factor
                     append_to_dict(metrics, micro_batch_metrics)
 
                 optimizer_step_start = time.perf_counter()
