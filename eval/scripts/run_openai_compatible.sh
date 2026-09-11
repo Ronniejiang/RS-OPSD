@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# OPD-V OpenAI-compatible evaluation launcher for the remote-sensing suites.
+# Run a remote-sensing benchmark against an already-running OpenAI-compatible vision endpoint.
 # BENCHMARK accepts lrs-vqa, mme-realworld-rs, xlrs-bench, or a comma-separated list.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+cd "${REPO_ROOT}"
 
 PYTHON="${PYTHON:-python3}"
 API_BASE="${API_BASE:?ERROR: API_BASE must be set (for example http://localhost:8000/v1)}"
@@ -13,7 +17,7 @@ API_KEY="${OPENAI_API_KEY:-EMPTY}"
 LRS_ROOT="${LRS_ROOT:-}"
 MME_ROOT="${MME_ROOT:-}"
 XLRS_ROOT="${XLRS_ROOT:-}"
-OUT_ROOT="${OUT_ROOT:-eval/results}"
+OUT_ROOT="${OUT_ROOT:-${REPO_ROOT}/eval/results}"
 RUN_NAME="${RUN_NAME:-${OPENAI_MODEL_ID//\//_}}"
 MAX_TOKENS="${MAX_TOKENS:-4096}"
 MAX_RETRIES="${MAX_RETRIES:-3}"
@@ -25,6 +29,9 @@ JPEG_QUALITY="${JPEG_QUALITY:-95}"
 ENABLE_THINKING="${ENABLE_THINKING:-}"
 RESUME="${RESUME:-0}"
 LIMIT="${LIMIT:-}"
+LRS_SEMANTIC_MODEL="${LRS_SEMANTIC_MODEL:-}"
+LRS_SEMANTIC_THRESHOLD="${LRS_SEMANTIC_THRESHOLD:-0.85}"
+LRS_SEMANTIC_BATCH_SIZE="${LRS_SEMANTIC_BATCH_SIZE:-64}"
 
 ARGS=(
   --dataset "${BENCHMARK}"
@@ -67,6 +74,7 @@ done
 [[ -n "${XLRS_ROOT}" ]] && ARGS+=(--xlrs-root "${XLRS_ROOT}")
 [[ "${RESUME}" == "1" ]] && ARGS+=(--resume)
 [[ -n "${LIMIT}" ]] && ARGS+=(--limit "${LIMIT}")
+[[ -n "${LRS_SEMANTIC_MODEL}" ]] && ARGS+=(--lrs-semantic-model "${LRS_SEMANTIC_MODEL}" --lrs-semantic-threshold "${LRS_SEMANTIC_THRESHOLD}" --lrs-semantic-batch-size "${LRS_SEMANTIC_BATCH_SIZE}")
 [[ -n "${ENABLE_THINKING}" ]] && ARGS+=(--enable-thinking "${ENABLE_THINKING}")
 
 "${PYTHON}" -m eval.run "${ARGS[@]}"

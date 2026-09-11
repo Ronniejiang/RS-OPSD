@@ -6,14 +6,13 @@ set -euo pipefail
 # directory and atomically renamed only after the expected model file exists.
 #
 # Example:
-#   bash eval/merge_fsdp_checkpoint_to_hf.sh \
+#   VERL_ROOT=/path/to/verl PYTHON=/path/to/python bash eval/scripts/merge_fsdp_checkpoint_to_hf.sh \
 #     /path/to/checkpoints/global_step_195
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-OPDV_ROOT="${OPDV_ROOT:-${REPO_ROOT}/other_methods/OPD-V}"
-EVAL_VENV="${EVAL_VENV:-${REPO_ROOT}/.venv-eval}"
-PYTHON="${PYTHON:-${EVAL_VENV}/bin/python}"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+VERL_ROOT="${VERL_ROOT:-}"
+PYTHON="${PYTHON:-python3}"
 
 CHECKPOINT_DIR="${1:-${CHECKPOINT_DIR:-}}"
 if [[ -z "${CHECKPOINT_DIR}" ]]; then
@@ -29,7 +28,7 @@ MERGED_PATH="${MERGED_PATH%/}"
 [[ -f "${ACTOR_DIR}/fsdp_config.json" ]] || { echo "ERROR: FSDP configuration missing: ${ACTOR_DIR}/fsdp_config.json" >&2; exit 1; }
 [[ -d "${ACTOR_DIR}/huggingface" ]] || { echo "ERROR: Hugging Face config directory missing: ${ACTOR_DIR}/huggingface" >&2; exit 1; }
 [[ -x "${PYTHON}" ]] || { echo "ERROR: Python environment not found: ${PYTHON}" >&2; exit 1; }
-[[ -d "${OPDV_ROOT}/verl" ]] || { echo "ERROR: OPD-V source tree not found: ${OPDV_ROOT}" >&2; exit 1; }
+[[ -d "${VERL_ROOT}/verl" ]] || { echo "ERROR: set VERL_ROOT to a source tree containing verl/: ${VERL_ROOT:-<unset>}" >&2; exit 1; }
 
 world_size="$("${PYTHON}" -c 'import json, sys; print(json.load(open(sys.argv[1]))["world_size"])' "${ACTOR_DIR}/fsdp_config.json")"
 for ((rank = 0; rank < world_size; rank++)); do
@@ -50,7 +49,7 @@ else
   echo "Merging ${world_size} FSDP shards"
   echo "  source: ${ACTOR_DIR}"
   echo "  target: ${MERGED_PATH}"
-  PYTHONPATH="${OPDV_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+  PYTHONPATH="${VERL_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
     "${PYTHON}" -m verl.model_merger merge \
       --backend fsdp \
       --local_dir "${ACTOR_DIR}" \

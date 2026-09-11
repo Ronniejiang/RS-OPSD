@@ -1,9 +1,7 @@
 # Remote-sensing benchmark evaluation
-
-This evaluator runs an OPD-V-served model through the same OpenAI-compatible
-chat-completions interface used by `other_methods/OPD-V/eval/infer.py`, while
-using the XLRS-Bench, MME-RealWorld Remote Sensing, and LRS-VQA adapters and
-metrics from the FOVIS evaluation design.
+This portable evaluator runs any OpenAI-compatible vision model on XLRS-Bench,
+MME-RealWorld Remote Sensing, and LRS-VQA. It supports vLLM directly, but can
+also target another compliant chat-completions endpoint.
 
 It writes one JSONL file per benchmark and `summary.json` under
 `eval/results/<run-name>/`. Results are flushed after each finished request;
@@ -16,6 +14,16 @@ Hugging Face Datasets:
 
 ```bash
 pip install openai pillow datasets
+```
+
+Optional LRS-VQA tolerant semantic scoring additionally uses the existing
+`torch` and `transformers` packages with a local BGE model. Download it
+once before submitting an evaluation; the submitted job uses local files only:
+
+```bash
+EVAL_PYTHON=python
+MODEL_DIR=/path/to/bge-base-en-v1.5
+"${EVAL_PYTHON}" -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='BAAI/bge-base-en-v1.5', local_dir='${MODEL_DIR}')"
 ```
 
 ## Dataset layouts
@@ -41,7 +49,7 @@ python -m eval.run \
 
 ## Run inference
 
-Start the OPD-V model with its normal OpenAI-compatible server, then pass its
+Start a model with an OpenAI-compatible server, then pass its
 base URL and exposed model name:
 
 ```bash
@@ -51,15 +59,28 @@ python -m eval.run \
   --mme-root /path/to/mme-realworld \
   --xlrs-root /path/to/xlrs-bench \
   --api-base http://localhost:8000/v1 \
-  --model-id OPD-V \
+  --model-id your-served-model-name \
   --parallel-workers 32 \
-  --run-name opd-v-rs
+  --run-name baseline
 ```
 
+For LRS-VQA, add a local BGE path to retain strict accuracy and also calculate
+a tolerant metric:
+
+```bash
+  --lrs-semantic-model /path/to/bge-base-en-v1.5 \
+  --lrs-semantic-threshold 0.85
+```
+
+The existing `correct` and `accuracy` fields remain strict normalized-string
+matches. The semantic pass writes `semantic_similarity`, `semantic_match`,
+`tolerant_correct`, and `tolerant_match_source`; summary adds
+`tolerant_accuracy`, `canonical_alias_rescued`, and `semantic_rescued`. Boolean and numeric answers
+remain exact-only to prevent antonyms or different counts from being accepted.
+
 `--enable-thinking True` passes
-`chat_template_kwargs.enable_thinking=true`, exactly as the existing OPD-V
-evaluator does. Images are converted to PNG data URIs before the request so
-that TIFF LRS-VQA images and in-memory XLRS images work with the same model
+`chat_template_kwargs.enable_thinking=true`, when supported by the endpoint.
+Images are converted to PNG data URIs before the request so that TIFF LRS-VQA images and in-memory XLRS images work with the same model
 interface. Use `--image-format jpeg --jpeg-quality 95` if request payloads are
 too large. `--max-pixels` bounds the image area before encoding (default:
 16,777,216 pixels).
@@ -68,10 +89,56 @@ There is also an environment-variable launcher:
 
 ```bash
 API_BASE=http://localhost:8000/v1 \
-OPENAI_MODEL_ID=OPD-V \
+OPENAI_MODEL_ID=your-served-model-name \
 BENCHMARK=lrs-vqa,mme-realworld-rs,xlrs-bench \
 LRS_ROOT=/path/to/lrs-vqa \
 MME_ROOT=/path/to/mme-realworld \
 XLRS_ROOT=/path/to/xlrs-bench \
-bash eval/run_eval.sh
+LRS_SEMANTIC_MODEL=/path/to/bge-base-en-v1.5 \
+LRS_SEMANTIC_THRESHOLD=0.85 \
+bash eval/scripts/run_openai_compatible.sh
+
 ```
+## Layout and launchers
+
+The public evaluator consists of adapters, scoring, and inference code at the
+top level of `eval/`. Canonical runnable helpers are in `eval/scripts/`:
+
+- `run_openai_compatible.sh`: evaluate an already-running model endpoint.
+- `run_local_vllm.sh`: validate layouts, start vLLM, verify the expected model
+  identity, evaluate, then stop the server.
+- `create_vllm_env.sh`: optionally create a reproducible vLLM environment.
+- `merge_fsdp_checkpoint_to_hf.sh`: merge a `verl` FSDP actor checkpoint.
+- `merge_lora_adapter_to_hf.sh`: merge a PEFT LoRA adapter into a standalone
+  Hugging Face model directory.
+
+Use `eval/.env.example` as the variable reference. All paths, model names,
+and server settings are supplied by command-line arguments or environment
+variables; no organization-specific path, username, queue, or dataset path is
+embedded in the public evaluator.
+
+For a local vLLM evaluation:
+
+```bash
+MODEL_PATH=/path/to/huggingface-model \
+SERVED_MODEL_NAME=your-served-model-name \
+BENCHMARK=lrs-vqa,mme-realworld-rs,xlrs-bench \
+LRS_ROOT=/path/to/LRS-VQA \
+MME_ROOT=/path/to/MME-RealWorld \
+XLRS_ROOT=/path/to/XLRS-Bench \
+TP_SIZE=1 \
+bash eval/scripts/run_local_vllm.sh
+```
+
+FSDP merging requires a compatible `verl` checkout and Python environment:
+
+```bash
+VERL_ROOT=/path/to/verl \
+PYTHON=/path/to/python \
+bash eval/scripts/merge_fsdp_checkpoint_to_hf.sh /path/to/global_step_N
+```
+
+The strict `correct` / `accuracy` fields are never changed by tolerant LRS-VQA
+scoring. The optional tolerant score first applies a small audited alias table
+(for example, `rectangle` / `rectangular`) and only then uses local BGE cosine
+similarity for remaining non-boolean, non-numeric answers.

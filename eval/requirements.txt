@@ -1,0 +1,9 @@
+# Core benchmark evaluator dependencies.
+pillow>=10.0
+openai>=1.0
+datasets>=2.0
+
+# Optional: required only for LRS-VQA tolerant embedding scoring.
+# Install these in the same environment when --lrs-semantic-model is used.
+transformers>=4.45
+torch>=2.2

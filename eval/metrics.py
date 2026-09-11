@@ -127,6 +127,42 @@ def summarize_records(records: list[dict[str, Any]], *, include_breakdowns: bool
     ]
     if jaccards:
         summary["mean_jaccard"] = sum(jaccards) / len(jaccards)
+    tolerant_records = [
+        record
+        for record in records
+        if record.get("dataset") == "lrs-vqa" and "tolerant_correct" in record
+    ]
+    if tolerant_records:
+        tolerant_correct = sum(bool(record["tolerant_correct"]) for record in tolerant_records)
+        tolerant_rescued = sum(
+            not bool(record.get("correct")) and bool(record["tolerant_correct"])
+            for record in tolerant_records
+        )
+        canonical_alias_rescued = sum(
+            record.get("tolerant_match_source") == "canonical_alias"
+            for record in tolerant_records
+        )
+        semantic_rescued = sum(
+            record.get("tolerant_match_source") == "embedding"
+            for record in tolerant_records
+        )
+        similarities = [
+            float(record["semantic_similarity"])
+            for record in tolerant_records
+            if record.get("semantic_similarity") is not None
+        ]
+        summary.update(
+            {
+                "tolerant_correct": tolerant_correct,
+                "tolerant_accuracy": tolerant_correct / len(tolerant_records),
+                "tolerant_rescued": tolerant_rescued,
+                "canonical_alias_rescued": canonical_alias_rescued,
+                "semantic_rescued": semantic_rescued,
+                "semantic_scored": sum(bool(record.get("semantic_scored")) for record in tolerant_records),
+            }
+        )
+        if similarities:
+            summary["mean_semantic_similarity"] = sum(similarities) / len(similarities)
     if include_breakdowns:
         summary["by_category"] = _group_summary(records, "category")
         if records and records[0].get("dataset") == "lrs-vqa":

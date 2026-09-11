@@ -42,3 +42,17 @@ eval/thinking_results/
 .DS_Store
 .idea/
 .vscode/
+# Local-only experiment extensions and legacy evaluator entry points
+/eval/eval_local_opdv_qwen3vl8b.sh
+/eval/eval_local_opdv_qwen3vl8b_thinking.sh
+/eval/merge_fsdp_checkpoint_to_hf.sh
+/eval/run_eval.sh
+/eval/run_local_opdv_rs.sh
+/eval/run_opdv_eval_with_venv.sh
+/eval/setup_opdv_eval_env.sh
+/eval/pa_opd_thinking.py
+/eval/tests/test_pa_opd_thinking.py
+/eval/**/*.orig
+*.orig
+/eval/merge_lora_adapter_to_hf.py
+/eval/merge_lora_adapter_to_hf.sh

@@ -1,4 +1,4 @@
-"""Evaluate an OPD-V served model on XLRS-Bench, MME-RealWorld RS, and LRS-VQA."""
+"""Evaluate an OpenAI-compatible model on XLRS-Bench, MME-RealWorld RS, and LRS-VQA."""
 
 from __future__ import annotations
 
@@ -11,8 +11,15 @@ import traceback
 from typing import Any
 
 from .adapters import EvalSample, inspect_dataset, iter_dataset
+from .lrs_semantic import (
+    BGEEmbedder,
+    LRSSemanticConfig,
+    PairSimilarityScorer,
+    annotate_lrs_semantic_records,
+    write_jsonl_atomic,
+)
 from .metrics import build_prompt, score_prediction, summarize_records
-from .model import OPDVOpenAIGenerator
+from .model import OpenAICompatibleGenerator
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -63,11 +70,29 @@ def parse_args() -> argparse.Namespace:
         "--enable-thinking",
         choices=("True", "False"),
         default=None,
-        help="Pass chat_template_kwargs.enable_thinking to OPD-V's OpenAI-compatible server.",
+        help="Pass chat_template_kwargs.enable_thinking to a compatible Qwen-style server.",
     )
     parser.add_argument("--max-pixels", type=int, default=16_777_216)
     parser.add_argument("--image-format", choices=("png", "jpeg"), default="png")
     parser.add_argument("--jpeg-quality", type=int, default=95)
+    parser.add_argument(
+        "--lrs-semantic-model",
+        type=_path,
+        default=None,
+        help="Local Hugging Face BGE model used only for optional LRS-VQA tolerant scoring.",
+    )
+    parser.add_argument(
+        "--lrs-semantic-threshold",
+        type=float,
+        default=0.85,
+        help="Cosine-similarity threshold for optional LRS-VQA tolerant scoring.",
+    )
+    parser.add_argument(
+        "--lrs-semantic-batch-size",
+        type=int,
+        default=64,
+        help="CPU batch size for optional LRS-VQA semantic embeddings.",
+    )
     parser.add_argument("--output-root", type=_path, default=REPO_ROOT / "eval" / "results")
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--resume", action="store_true", help="Skip sample IDs already written to JSONL output.")
@@ -87,6 +112,19 @@ def parse_args() -> argparse.Namespace:
         parser.error("--jpeg-quality must be in [1, 100]")
     if args.limit is not None and args.limit <= 0:
         parser.error("--limit must be positive")
+    if args.lrs_semantic_model is not None:
+        if "lrs-vqa" not in args.datasets:
+            parser.error("--lrs-semantic-model requires --dataset lrs-vqa or --dataset all")
+        try:
+            args.lrs_semantic_config = LRSSemanticConfig(
+                model_path=args.lrs_semantic_model,
+                threshold=args.lrs_semantic_threshold,
+                batch_size=args.lrs_semantic_batch_size,
+            )
+        except ValueError as error:
+            parser.error(str(error))
+    else:
+        args.lrs_semantic_config = None
     if not args.dry_run:
         if not args.api_base:
             parser.error("--api-base is required unless --dry-run is used")
@@ -147,7 +185,7 @@ def record_for_error(sample: EvalSample, error: Exception, elapsed_sec: float = 
     }
 
 
-def _generate_record(sample: EvalSample, generator: OPDVOpenAIGenerator) -> dict[str, Any]:
+def _generate_record(sample: EvalSample, generator: OpenAICompatibleGenerator) -> dict[str, Any]:
     started = datetime.now(timezone.utc)
     try:
         prediction = generator.generate(sample.load_image(), build_prompt(sample))
@@ -194,11 +232,13 @@ def load_records(path: Path) -> list[dict[str, Any]]:
 def run_dataset(
     dataset: str,
     root: Path,
-    generator: OPDVOpenAIGenerator,
+    generator: OpenAICompatibleGenerator,
     output_path: Path,
     resume: bool,
     limit: int | None,
     parallel_workers: int,
+    semantic_scorer: PairSimilarityScorer | None,
+    semantic_threshold: float,
 ) -> dict[str, Any]:
     if output_path.exists() and not resume:
         raise FileExistsError(f"Result file already exists: {output_path}. Use --resume or choose --run-name.")
@@ -236,6 +276,9 @@ def run_dataset(
             fill_pending()
 
     records = load_records(output_path)
+    if dataset == "lrs-vqa" and semantic_scorer is not None:
+        annotate_lrs_semantic_records(records, semantic_scorer, semantic_threshold)
+        write_jsonl_atomic(output_path, records)
     summary = summarize_records(records)
     summary.update({"dataset": dataset, "new_samples": submitted, "resumed_samples": skipped})
     return summary
@@ -253,6 +296,11 @@ def save_summary(path: Path, summaries: dict[str, Any], args: argparse.Namespace
             "max_pixels": args.max_pixels,
             "image_format": args.image_format,
             "jpeg_quality": args.jpeg_quality,
+            "lrs_semantic": (
+                args.lrs_semantic_config.as_dict()
+                if args.lrs_semantic_config is not None
+                else {"enabled": False}
+            ),
         },
         "datasets": summaries,
     }
@@ -273,7 +321,7 @@ def main() -> None:
         return
 
     run_dir = args.output_root / resolve_run_name(args)
-    generator = OPDVOpenAIGenerator(
+    generator = OpenAICompatibleGenerator(
         api_base=args.api_base,
         api_key=args.api_key,
         model_id=args.model_id,
@@ -284,6 +332,11 @@ def main() -> None:
         max_pixels=args.max_pixels,
         image_format=args.image_format,
         jpeg_quality=args.jpeg_quality,
+    )
+    semantic_scorer = (
+        BGEEmbedder(args.lrs_semantic_config)
+        if args.lrs_semantic_config is not None
+        else None
     )
     summaries: dict[str, Any] = {"inspections": inspections}
     try:
@@ -296,6 +349,8 @@ def main() -> None:
                 resume=args.resume,
                 limit=args.limit,
                 parallel_workers=args.parallel_workers,
+                semantic_scorer=semantic_scorer,
+                semantic_threshold=args.lrs_semantic_threshold,
             )
             run_dir.mkdir(parents=True, exist_ok=True)
             save_summary(run_dir / "summary.json", summaries, args)

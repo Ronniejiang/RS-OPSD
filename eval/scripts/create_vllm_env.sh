@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Create (once) and reuse a minimal, persistent vLLM environment for OPD-V
-# inference. FOVIS/.venv-fovis is intentionally not used: it has neither vLLM
-# nor the OpenAI Python client required by this evaluator.
+# Create (once) and reuse a minimal, persistent vLLM environment for this
+# evaluator. It is intentionally separate from any training environment.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 EVAL_VENV="${EVAL_VENV:-${REPO_ROOT}/.venv-eval}"
 PIP_CACHE_DIR="${PIP_CACHE_DIR:-${REPO_ROOT}/.cache/pip}"
@@ -18,7 +17,7 @@ command -v "${PYTHON_BIN}" >/dev/null 2>&1 || { echo "ERROR: Python not found: $
 mkdir -p "$(dirname "${EVAL_VENV}")" "${PIP_CACHE_DIR}"
 
 if [[ ! -x "${EVAL_VENV}/bin/python" ]]; then
-  echo "Creating OPD-V evaluation environment: ${EVAL_VENV}"
+  echo "Creating evaluation environment: ${EVAL_VENV}"
   "${PYTHON_BIN}" -m venv "${EVAL_VENV}"
 fi
 
@@ -46,7 +45,7 @@ then
 fi
 
 if [[ "${needs_install}" == "1" ]]; then
-  echo "Installing pinned OPD-V inference dependencies. This happens only once per ${EVAL_VENV}."
+  echo "Installing pinned inference dependencies. This happens only once per ${EVAL_VENV}."
   "${EVAL_VENV}/bin/python" -m pip install --upgrade pip
   "${EVAL_VENV}/bin/python" -m pip install \
     "vllm==${VLLM_VERSION}" \

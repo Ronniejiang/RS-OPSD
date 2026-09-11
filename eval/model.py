@@ -1,4 +1,4 @@
-"""OpenAI-compatible model adapter matching OPD-V's serving interface."""
+"""OpenAI-compatible vision model adapter."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ import time
 from PIL import Image
 
 
-class OPDVOpenAIGenerator:
+class OpenAICompatibleGenerator:
     """Generate one answer at a time through an OpenAI-compatible vision endpoint.
 
     The request shape, retry policy, and optional ``enable_thinking`` argument
-    intentionally follow ``other_methods/OPD-V/eval/infer.py``.  A client is
+    are compatible with vLLM and other OpenAI-compatible servers. A client is
     kept per worker thread because benchmark inference is concurrent.
     """
 
@@ -46,7 +46,7 @@ class OPDVOpenAIGenerator:
 
     @staticmethod
     def normalize_model_answer(model_answer_raw: str) -> str:
-        """Strip Qwen thinking/answer wrappers used by OPD-V serving."""
+        """Strip common Qwen thinking and answer wrappers."""
         answer = model_answer_raw.strip()
         think_end = answer.rfind("</think>")
         if think_end != -1:
@@ -130,3 +130,8 @@ class OPDVOpenAIGenerator:
                 if attempt < self.max_retries:
                     time.sleep(1.0)
         raise RuntimeError(f"API request failed after {self.max_retries} attempts: {last_error}")
+
+
+# Compatibility alias for earlier local launchers. New integrations should use
+# OpenAICompatibleGenerator.
+OPDVOpenAIGenerator = OpenAICompatibleGenerator

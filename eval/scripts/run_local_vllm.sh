@@ -1,28 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# One-command evaluation for the local OPD-V-Qwen3-VL-8B-Instruct checkpoint.
-# It validates data, starts vLLM, waits for /v1/models, evaluates, and stops
-# the server. The model path and all launch parameters are overridable below.
+# One-command evaluation for a local Hugging Face vision model. It validates
+# datasets, starts vLLM, verifies /v1/models, evaluates, and stops the server.
+# All model and serving parameters are supplied through environment variables.
 #
 # Examples:
 #   CUDA_VISIBLE_DEVICES=0 TP_SIZE=1 BENCHMARK=lrs-vqa \
-#   LRS_ROOT=/path/to/lrs-vqa bash eval/eval_local_opdv_qwen3vl8b.sh
+#   MODEL_PATH=/path/to/model LRS_ROOT=/path/to/lrs-vqa bash eval/scripts/run_local_vllm.sh
 #
 #   CUDA_VISIBLE_DEVICES=0,1,2,3 TP_SIZE=4 BENCHMARK=all \
 #   LRS_ROOT=/path/to/lrs MME_ROOT=/path/to/mme XLRS_ROOT=/path/to/xlrs \
-#   bash eval/eval_local_opdv_qwen3vl8b.sh
+#   MODEL_PATH=/path/to/model bash eval/scripts/run_local_vllm.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PYTHON="${PYTHON:-python3}"
 VLLM_BIN="${VLLM_BIN:-vllm}"
 
 MODEL_PATH="${MODEL_PATH:-}"
-SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-OPD-V-Qwen3-VL-8B-Instruct}"
+SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-$(basename "${MODEL_PATH:-model}")}"
 HOST="${HOST:-127.0.0.1}"
-PORT="${PORT:-8000}"
-API_BASE="${API_BASE:-http://${HOST}:${PORT}/v1}"
+PORT="${PORT:-}"
+API_BASE="${API_BASE:-}"
 TP_SIZE="${TP_SIZE:-4}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
@@ -49,6 +49,9 @@ JPEG_QUALITY="${JPEG_QUALITY:-95}"
 ENABLE_THINKING="${ENABLE_THINKING:-False}"
 RESUME="${RESUME:-0}"
 LIMIT="${LIMIT:-}"
+LRS_SEMANTIC_MODEL="${LRS_SEMANTIC_MODEL:-}"
+LRS_SEMANTIC_THRESHOLD="${LRS_SEMANTIC_THRESHOLD:-0.85}"
+LRS_SEMANTIC_BATCH_SIZE="${LRS_SEMANTIC_BATCH_SIZE:-64}"
 
 [[ -d "${MODEL_PATH}" ]] || { echo "ERROR: model directory does not exist: ${MODEL_PATH}" >&2; exit 1; }
 [[ -f "${MODEL_PATH}/config.json" ]] || { echo "ERROR: config.json missing from: ${MODEL_PATH}" >&2; exit 1; }
@@ -62,6 +65,23 @@ DATASET_ARGS=(--dataset "${BENCHMARK}")
 [[ -n "${XLRS_ROOT}" ]] && DATASET_ARGS+=(--xlrs-root "${XLRS_ROOT}")
 
 cd "${REPO_ROOT}"
+# Ensure local inference and readiness checks bypass inherited proxies.
+export NO_PROXY="${NO_PROXY:+${NO_PROXY},}127.0.0.1,localhost,${HOST}"
+export no_proxy="${NO_PROXY}"
+if [[ "${SKIP_SERVE}" != "1" ]]; then
+  PORT="$("${PYTHON}" -m eval.server_readiness port --host "${HOST}" --port "${PORT:-0}")"
+  EXPECTED_API_BASE="http://${HOST}:${PORT}/v1"
+  if [[ -n "${API_BASE}" && "${API_BASE%/}" != "${EXPECTED_API_BASE}" ]]; then
+    echo "ERROR: API_BASE must match the local server: ${EXPECTED_API_BASE}" >&2
+    exit 1
+  fi
+  API_BASE="${EXPECTED_API_BASE}"
+else
+  API_BASE="${API_BASE:-http://${HOST}:${PORT:-8000}/v1}"
+fi
+echo "Model endpoint: ${API_BASE}; expected model: ${SERVED_MODEL_NAME}"
+# Model identity is verified before evaluation, not just HTTP availability.
+
 echo "Checking benchmark layouts before loading the model..."
 "${PYTHON}" -m eval.run "${DATASET_ARGS[@]}" --dry-run
 
@@ -77,20 +97,12 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 wait_for_server() {
-  local elapsed=0
-  until curl --fail --silent --show-error "${API_BASE}/models" >/dev/null; do
-    if [[ -n "${server_pid}" ]] && ! kill -0 "${server_pid}" 2>/dev/null; then
-      echo "ERROR: vLLM exited during startup. Last log lines:" >&2
-      tail -n 80 "${SERVER_LOG}" >&2 || true
-      return 1
-    fi
-    if (( elapsed >= WAIT_SECONDS )); then
-      echo "ERROR: server was not ready after ${WAIT_SECONDS}s: ${API_BASE}/models" >&2
-      return 1
-    fi
-    sleep 2
-    elapsed=$((elapsed + 2))
-  done
+  local probe_args=(wait --api-base "${API_BASE}" --model-id "${SERVED_MODEL_NAME}" --timeout "${WAIT_SECONDS}")
+  [[ -n "${server_pid}" ]] && probe_args+=(--pid "${server_pid}")
+  if ! "${PYTHON}" -m eval.server_readiness "${probe_args[@]}"; then
+    tail -n 80 "${SERVER_LOG}" >&2 || true
+    return 1
+  fi
 }
 
 if [[ "${SKIP_SERVE}" == "1" ]]; then
@@ -135,5 +147,6 @@ EVAL_ARGS=(
 )
 [[ "${RESUME}" == "1" ]] && EVAL_ARGS+=(--resume)
 [[ -n "${LIMIT}" ]] && EVAL_ARGS+=(--limit "${LIMIT}")
+[[ -n "${LRS_SEMANTIC_MODEL}" ]] && EVAL_ARGS+=(--lrs-semantic-model "${LRS_SEMANTIC_MODEL}" --lrs-semantic-threshold "${LRS_SEMANTIC_THRESHOLD}" --lrs-semantic-batch-size "${LRS_SEMANTIC_BATCH_SIZE}")
 
 "${PYTHON}" -m eval.run "${EVAL_ARGS[@]}"

@@ -9,8 +9,15 @@ import unittest
 from PIL import Image
 
 from eval.adapters import EvalSample, resolve_lrs_image
+from eval.lrs_semantic import (
+    annotate_lrs_semantic_records,
+    canonicalize_lrs_answer,
+    is_protected_answer,
+    write_jsonl_atomic,
+)
+from eval.rescore_lrs_tolerant import load_lrs_records, rescore_records
 from eval.metrics import build_prompt, extract_choice, extract_multi_choices, score_prediction, summarize_records
-from eval.model import OPDVOpenAIGenerator
+from eval.model import OpenAICompatibleGenerator
 from eval.run import selected_datasets
 
 
@@ -54,7 +61,7 @@ class EvalTests(unittest.TestCase):
         self.assertIn("more than one", build_prompt(xlrs))
 
     def test_openai_adapter_encodes_and_normalizes_without_openai_dependency(self) -> None:
-        generator = OPDVOpenAIGenerator(
+        generator = OpenAICompatibleGenerator(
             api_base="http://localhost:8000/v1",
             api_key="EMPTY",
             model_id="model",
@@ -78,6 +85,57 @@ class EvalTests(unittest.TestCase):
         ])
         self.assertEqual(summary["accuracy"], 0.5)
         self.assertEqual(summary["total_inference_sec"], 2.0)
+
+    def test_lrs_tolerant_semantic_scoring_keeps_strict_results(self) -> None:
+        class FakeSimilarity:
+            def __init__(self) -> None:
+                self.pairs: list[tuple[str, str]] = []
+
+            def score_pairs(self, pairs):
+                self.pairs = list(pairs)
+                return [0.84]
+
+        records = [
+            {"dataset": "lrs-vqa", "status": "ok", "correct": False, "prediction": "rectangle", "ground_truth": "rectangular", "metrics": {}, "metadata": {}, "elapsed_sec": 1.0},
+            {"dataset": "lrs-vqa", "status": "ok", "correct": False, "prediction": "no", "ground_truth": "yes", "metrics": {}, "metadata": {}, "elapsed_sec": 1.0},
+            {"dataset": "lrs-vqa", "status": "ok", "correct": False, "prediction": "2", "ground_truth": "3", "metrics": {}, "metadata": {}, "elapsed_sec": 1.0},
+            {"dataset": "lrs-vqa", "status": "ok", "correct": False, "prediction": "green", "ground_truth": "blue", "metrics": {}, "metadata": {}, "elapsed_sec": 1.0},
+            {"dataset": "lrs-vqa", "status": "ok", "correct": True, "prediction": "yes", "ground_truth": "yes", "metrics": {}, "metadata": {}, "elapsed_sec": 1.0},
+            {"dataset": "lrs-vqa", "status": "error", "correct": False, "prediction": "", "ground_truth": "urban", "metrics": {}, "metadata": {}, "elapsed_sec": 0.0},
+            {"dataset": "mme-realworld-rs", "status": "ok", "correct": False, "metrics": {}, "metadata": {}, "elapsed_sec": 1.0},
+        ]
+        scorer = FakeSimilarity()
+        annotate_lrs_semantic_records(records, scorer, threshold=0.85)
+
+        self.assertEqual(scorer.pairs, [("green", "blue")])
+        self.assertFalse(records[0]["correct"])
+        self.assertTrue(records[0]["tolerant_correct"])
+        self.assertEqual(records[0]["tolerant_match_source"], "canonical_alias")
+        self.assertFalse(records[0]["semantic_scored"])
+        self.assertEqual(records[1]["tolerant_match_source"], "strict_guard")
+        self.assertEqual(records[2]["tolerant_match_source"], "strict_guard")
+        self.assertFalse(records[3]["tolerant_correct"])
+        self.assertEqual(records[3]["tolerant_match_source"], "not_matched")
+        self.assertTrue(records[4]["tolerant_correct"])
+        self.assertEqual(records[5]["tolerant_match_source"], "error")
+        self.assertNotIn("tolerant_correct", records[6])
+        self.assertTrue(is_protected_answer("second"))
+        self.assertFalse(is_protected_answer("stationary"))
+
+        summary = summarize_records(records)
+        self.assertEqual(summary["correct"], 1)
+        self.assertEqual(summary["tolerant_correct"], 2)
+        self.assertEqual(summary["tolerant_rescued"], 1)
+        self.assertEqual(summary["canonical_alias_rescued"], 1)
+        self.assertEqual(summary["semantic_rescued"], 0)
+        self.assertEqual(summary["semantic_scored"], 1)
+        self.assertAlmostEqual(summary["tolerant_accuracy"], 2 / 6)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "results.jsonl"
+            write_jsonl_atomic(output_path, records)
+            persisted = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(persisted[0]["tolerant_match_source"], "canonical_alias")
 
 
 if __name__ == "__main__":
