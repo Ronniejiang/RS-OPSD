@@ -17,20 +17,6 @@ experiment logs, and other generated artifacts.
 | `other_methods/OPD-V/` | OPD-V baseline, included as a Git submodule at a fixed upstream revision. |
 | `eval/*.sh` | Local evaluation and environment launchers. |
 
-<!--## Clone
-
-Clone with submodules so that the baseline source is available:
-
-```bash
-git clone --recurse-submodules https://github.com/Ronniejiang/RS-OPSD.git
-cd RS-OPSD
-```
-
-For an existing clone, initialize the baseline with:
-
-```bash
-git submodule update --init --recursive
-```-->
 
 ## PA-OPD training
 
