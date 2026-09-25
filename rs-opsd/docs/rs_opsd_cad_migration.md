@@ -9,8 +9,9 @@ objective, not Reference KL or the optional top-k JSD extension.
 The canonical Python loss entry is `compute_cad_loss`. Six Hydra configs use
 the `rs_opsd_direct_2k_` prefix; the recipe suffixes remain unchanged. Old loss
 function/config names are removed, without aliases. `scripts/train.sh` and
-repository callers use the new names. The `PA-OPD` directory, `pa_opd_*` fields,
-environment variables, recipe CLI choices and submission filenames remain.
+repository callers use the new names. The training directory is `rs-opsd/`.
+The `pa_opd_*` fields, environment variables, recipe CLI choices and local-only
+submission filenames retain their existing names for compatibility.
 Explicit `RUN_NAME` / `OUTPUT_DIR` values keep their existing semantics.
 
 New training logs emit only the new CAD names:

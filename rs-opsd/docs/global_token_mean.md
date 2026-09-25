@@ -44,7 +44,7 @@ and explicitly selected non-token-mean reductions retain their existing path.
 
 ## Verification
 
-Run from PA-OPD:
+Run from `rs-opsd/`:
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. OMP_NUM_THREADS=1 \

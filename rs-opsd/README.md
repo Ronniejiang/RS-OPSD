@@ -64,7 +64,7 @@ It adds a separate weighted term and is not part of the main CAD + KL equation.
 
 The active direct recipes have no reasoning tags, format reward, RLVR, or adaptive
 rollout controller. `scripts/train.sh` is portable; cluster submission wrappers
-and local environment defaults are provided separately under `scripts/`.
+are local-only and are not included in the public repository.
 
 ## Dataset contract
 
