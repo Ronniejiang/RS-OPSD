@@ -4,8 +4,8 @@ RS-OPSD combines **Context-Preserving Visual Privilege (CPVP)** and
 **Correctness-Aligned Distillation (CAD)** for remote-sensing visual question
 answering. This repository contains its training and evaluation code.
 
-The repository is organized around the proposed method, a standalone evaluator,
-and a pinned OPD-V baseline. It intentionally excludes datasets, checkpoints,
+The repository is organized around the proposed method and a standalone
+evaluator. It intentionally excludes datasets, checkpoints,
 experiment logs, and other generated artifacts.
 
 ## Repository layout
@@ -14,7 +14,6 @@ experiment logs, and other generated artifacts.
 | --- | --- |
 | `rs-opsd/` | RS-OPSD training implementation, configurations, unit tests, and runtime launchers. |
 | `eval/` | OpenAI-compatible evaluator for LRS-VQA, MME-RealWorld Remote Sensing, and XLRS-Bench. |
-| `other_methods/OPD-V/` | OPD-V baseline, included as a Git submodule at a fixed upstream revision. |
 | `eval/scripts/` | Local evaluation and environment launchers. |
 
 
@@ -65,5 +64,4 @@ scheduler-specific submission scripts.
 
 ## License
 
-RS-OPSD is distributed under the [Apache-2.0 license](rs-opsd/LICENSE). The
-OPD-V baseline remains subject to its upstream license and notices.
+RS-OPSD is distributed under the [Apache-2.0 license](rs-opsd/LICENSE).

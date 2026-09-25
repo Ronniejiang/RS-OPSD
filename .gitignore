@@ -58,6 +58,7 @@ eval/thinking_results/
 /eval/merge_lora_adapter_to_hf.sh
 
 # Local deployment wrappers and private experiment records (keep on disk).
+/other_methods/
 submit*.sh
 submit*.py
 /rs-opsd/scripts/start_ppu_debug_attempt.py
