@@ -33,7 +33,7 @@ import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.trainer.ppo.core_algos import (
     agg_loss,
-    compute_opdvr_loss,
+    compute_cad_loss,
     compute_pa_opd_safe_topk_jsd_loss,
     compute_self_distillation_loss,
     get_policy_loss_fn,
@@ -45,6 +45,7 @@ from verl.trainer.ppo.pa_opd import (
 )
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 from verl.trainer.ppo.pa_opd_direct import compute_constrained_teacher_reliability
+from verl.trainer.ppo.pa_opd_reduction import collect_global_token_mean
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.metric import AggregationType, Metric, reduce_metrics
@@ -1305,6 +1306,9 @@ class DataParallelPPOActor(BasePPOActor):
         mini_batches = data.split(self.config.ppo_mini_batch_size)
 
         on_policy = len(mini_batches) == 1 and self.config.ppo_epochs == 1
+        pa_opd_global_token_mean = pa_opd_enabled and self.config.loss_agg_mode == "token-mean"
+        if pa_opd_global_token_mean and self.ulysses_sequence_parallel_size != 1:
+            raise NotImplementedError("PA-OPD global token mean currently requires Ulysses SP=1.")
 
         metrics = {
             "actor/pg_loss": 0.0,
@@ -1313,7 +1317,12 @@ class DataParallelPPOActor(BasePPOActor):
         if self_distillation_enabled:
             metrics["actor/grpo_loss"] = 0.0
             if pa_opd_enabled:
-                metrics["actor/opdvr_loss"] = 0.0
+                metrics["actor/cad_loss"] = 0.0
+                metrics["actor/distillation_loss"] = 0.0
+                if pa_opd_global_token_mean:
+                    metrics["pa_opd/global_token_mean"] = 1.0
+                    if pa_opd_topk_jsd_enabled:
+                        metrics["actor/topk_jsd_loss"] = 0.0
             else:
                 metrics["actor/vopd_loss"] = 0.0
                 metrics["actor/vopd_loss_weighted"] = 0.0
@@ -1334,6 +1343,19 @@ class DataParallelPPOActor(BasePPOActor):
         did_update = False
         for _ in range(self.config.ppo_epochs):
             for batch_idx, mini_batch in enumerate(mini_batches):
+                token_mean = (
+                    collect_global_token_mean(mini_batch.batch, device=get_device_id())
+                    if pa_opd_global_token_mean else None
+                )
+                semantic_reduction = token_mean.kwargs("semantic") if token_mean is not None else {}
+                jsd_reduction = token_mean.kwargs("jsd_prefix") if token_mean is not None else {}
+                response_reduction = token_mean.kwargs("response") if token_mean is not None else {}
+                if token_mean is not None:
+                    append_to_dict(metrics, {
+                        "pa_opd/global_semantic_tokens": token_mean.counts[0].item(),
+                        "pa_opd/global_jsd_prefix_tokens": token_mean.counts[1].item(),
+                        "pa_opd/global_response_tokens": token_mean.counts[2].item(),
+                    })
                 if self.config.use_dynamic_bsz:
                     max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
                     micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
@@ -1365,7 +1387,11 @@ class DataParallelPPOActor(BasePPOActor):
                             policy_fallback_mask.float().mean().detach().item()
                         )
 
-                    if self.config.use_dynamic_bsz:
+                    if pa_opd_global_token_mean:
+                        # Each term already uses DP_size * local_sum / global_tokens.
+                        # FSDP averages gradients; do not also average micro-batches.
+                        loss_scale_factor = 1.0
+                    elif self.config.use_dynamic_bsz:
                         loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
                     else:
                         loss_scale_factor = 1 / self.gradient_accumulation
@@ -1450,7 +1476,7 @@ class DataParallelPPOActor(BasePPOActor):
                         # Standard Vision-OPD (including forced-think OPSD)
                         # distils every generated response token. In particular,
                         # this intentionally includes the <answer>...</answer>
-                        # payload; only PA-OPDVR below replaces it with a
+                        # payload; only RS-OPSD below replaces it with a
                         # semantic answer mask.
                         distillation_response_mask = response_mask
                         teacher_reliable = None
@@ -1584,8 +1610,8 @@ class DataParallelPPOActor(BasePPOActor):
                         loss_compute_start = time.perf_counter()
                         if pa_opd_enabled:
                             if teacher_reliable is None:
-                                raise RuntimeError("PA-OPDVR Teacher reliability probe was not computed.")
-                            vopd_loss, vopd_metrics = compute_opdvr_loss(
+                                raise RuntimeError("RS-OPSD Teacher reliability probe was not computed.")
+                            vopd_loss, vopd_metrics = compute_cad_loss(
                                 student_log_probs=log_prob,
                                 teacher_log_probs=teacher_log_prob,
                                 semantic_token_mask=distillation_response_mask,
@@ -1596,7 +1622,11 @@ class DataParallelPPOActor(BasePPOActor):
                                 old_log_probs=old_log_prob,
                                 rollout_is_weights=rollout_is_weights,
                                 loss_agg_mode=loss_agg_mode,
+                                **semantic_reduction,
                             )
+                            # CAD is the sampled-answer objective only; optional
+                            # JSD is reported separately and in distillation_loss.
+                            metrics["actor/cad_loss"] += vopd_loss.detach().item() * loss_scale_factor
                             if pa_opd_topk_jsd_enabled:
                                 if any(
                                     item is None
@@ -1618,11 +1648,16 @@ class DataParallelPPOActor(BasePPOActor):
                                     old_log_probs=old_log_prob,
                                     rollout_is_weights=rollout_is_weights,
                                     loss_agg_mode=loss_agg_mode,
+                                    **jsd_reduction,
                                 )
                                 jsd_coef = self_distillation_cfg.get("pa_opd_topk_jsd_coef", 1.0)
                                 vopd_metrics.update(jsd_metrics)
-                                vopd_metrics["actor/opdvr_sampled_loss"] = vopd_loss.detach().item()
-                                vopd_metrics["actor/topk_jsd_loss"] = jsd_loss.detach().item()
+                                if pa_opd_global_token_mean:
+                                    # Sum micro contributions; trainer's rank mean
+                                    # then reports the same global objective as backward.
+                                    metrics["actor/topk_jsd_loss"] += jsd_loss.detach().item()
+                                else:
+                                    vopd_metrics["actor/topk_jsd_loss"] = jsd_loss.detach().item()
                                 vopd_metrics["actor/topk_jsd_coef"] = jsd_coef
                                 vopd_loss = vopd_loss + jsd_coef * jsd_loss
                         else:
@@ -1650,7 +1685,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                         if pa_opd_enabled:
                             # The retained direct protocol is reward-free: its policy
-                            # gradient is exactly OPDVR (plus optional native KL/JSD).
+                            # gradient is exactly CAD (plus optional native KL/JSD).
                             grpo_loss = None
                             pg_loss = vopd_loss
                         elif policy_fallback_mask is not None and policy_fallback_mask.any().item():
@@ -1708,7 +1743,10 @@ class DataParallelPPOActor(BasePPOActor):
 
                     policy_loss = pg_loss
                     if calculate_entropy and entropy is not None:
-                        entropy_agg = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+                        entropy_agg = agg_loss(
+                            loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode,
+                            **response_reduction,
+                        )
                         micro_batch_metrics["actor/entropy"] = entropy_agg.detach().item()
                         if entropy_coeff != 0:
                             policy_loss -= entropy_agg * entropy_coeff
@@ -1719,7 +1757,10 @@ class DataParallelPPOActor(BasePPOActor):
                         kld = kl_penalty(
                             logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type
                         )
-                        kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+                        kl_loss = agg_loss(
+                            loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode,
+                            **response_reduction,
+                        )
 
                         policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
                         metrics["actor/kl_loss"] += kl_loss.detach().item() * loss_scale_factor
@@ -1742,7 +1783,7 @@ class DataParallelPPOActor(BasePPOActor):
                     metrics["actor/pg_loss"] += pg_loss.detach().item() * loss_scale_factor
                     if self_distillation_enabled:
                         if pa_opd_enabled:
-                            metrics["actor/opdvr_loss"] += vopd_loss.detach().item() * loss_scale_factor
+                            metrics["actor/distillation_loss"] += vopd_loss.detach().item() * loss_scale_factor
                         else:
                             metrics["actor/vopd_loss"] += vopd_loss.detach().item() * loss_scale_factor
                             metrics["actor/vopd_loss_weighted"] += vopd_loss.detach().item() * loss_scale_factor

@@ -269,6 +269,9 @@ checkpoint:
   # Whether to save checkpoints asynchronously. Only effective for Megatron as of now.
   async_save: False
 
+  # Optional independent output root for hf_model exports.
+  hf_model_dir: null
+
 # optimizer configs
 optim:
 

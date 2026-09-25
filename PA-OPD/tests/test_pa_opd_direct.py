@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
+import pytest
 from transformers import AutoProcessor, AutoTokenizer
 
 from verl.trainer.ppo.pa_opd_direct import (
@@ -21,9 +22,15 @@ from verl.utils.reward_score.pa_opd_direct_protocol import (
 )
 
 
+def _model_path():
+    model_path = os.environ.get("PA_OPD_MODEL_PATH")
+    if not model_path:
+        pytest.skip("Set PA_OPD_MODEL_PATH to a local Qwen3-VL checkpoint for tokenizer tests")
+    return model_path
+
+
 def _tokenizer():
-    model_path = os.environ.get("PA_OPD_MODEL_PATH", "/dataset_rc/models/Qwen3-VL-8B-Instruct")
-    return AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    return AutoTokenizer.from_pretrained(_model_path(), trust_remote_code=True, local_files_only=True)
 
 
 def test_direct_protocol_normalizes_multi_select_order_and_rejects_prose():
@@ -57,6 +64,8 @@ def test_direct_constrained_probe_checks_full_set_and_terminal_eos():
     plan = build_direct_probe_plan(tokenizer, "Question\n", ["A", "B", "C", "D"], "B,A,C")
     assert plan.canonical_answer == "A,B,C"
     assert len(plan.response_token_ids) == 4  # A, ,B, ,C, EOS
+    assert tokenizer.eos_token_id not in plan.allowed_token_ids[0]
+    assert all(candidates[0] == tokenizer.eos_token_id for candidates in plan.allowed_token_ids[1:])
 
     max_candidates = max(len(row) for row in plan.allowed_token_ids)
     allowed = torch.full((1, len(plan.response_token_ids), max_candidates), -1, dtype=torch.long)
@@ -73,6 +82,13 @@ def test_direct_constrained_probe_checks_full_set_and_terminal_eos():
     )
     assert reliable.tolist() == [True]
     assert probability.item() > 0.99
+
+    # Real Qwen BPE: A -> EOS must not pass an A,B,C target, even if ,B
+    # has the highest probability among the remaining option labels.
+    all_log_probs[0, 1, tokenizer.eos_token_id] = 1.0
+    reliable, _ = compute_constrained_teacher_reliability(all_log_probs, target, target_mask, allowed)
+    assert reliable.tolist() == [False]
+    all_log_probs[0, 1, tokenizer.eos_token_id] = -30.0
 
     wrong_token = next(token for token in plan.allowed_token_ids[-1] if token != plan.response_token_ids[-1])
     all_log_probs[0, -1, wrong_token] = 1.0
@@ -109,8 +125,7 @@ def test_direct_loader_keeps_original_and_teacher_image_paths():
 
 
 def test_stock_qwen_template_disables_thinking_prefix():
-    model_path = os.environ.get("PA_OPD_MODEL_PATH", "/dataset_rc/models/Qwen3-VL-8B-Instruct")
-    processor = AutoProcessor.from_pretrained(model_path, trust_remote_code=True)
+    processor = AutoProcessor.from_pretrained(_model_path(), trust_remote_code=True, local_files_only=True)
     text = processor.apply_chat_template(
         [{"role": "user", "content": "Choose one option."}],
         tokenize=False,

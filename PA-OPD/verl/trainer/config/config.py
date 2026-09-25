@@ -36,6 +36,9 @@ class CheckpointConfig(BaseConfig):
     save_contents: list[str] = field(default_factory=lambda: ["model", "optimizer", "extra"])
     load_contents: list[str] = field(default_factory=lambda: ["model", "optimizer", "extra"])
     async_save: bool = False
+    # Optional independent HF export root; periodic inference weights survive
+    # rotation of the much larger resumable model/optimizer/Teacher shards.
+    hf_model_dir: Optional[str] = None
 
 
 @dataclass

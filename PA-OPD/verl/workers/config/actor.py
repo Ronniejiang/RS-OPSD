@@ -146,7 +146,7 @@ class SelfDistillationConfig(BaseConfig):
     # constrained multi-token GT reliability probe for option sets.
     pa_opd_direct_answer: bool = False
     pa_opd_reward_free: bool = False
-    # Optional GT-safe top-k JSD augmentation for direct PA-OPDVR.
+    # Optional GT-safe top-k JSD augmentation for direct RS-OPSD.
     pa_opd_topk_jsd_enabled: bool = False
     pa_opd_topk_jsd_coef: float = 1.0
 
@@ -220,11 +220,11 @@ class SelfDistillationConfig(BaseConfig):
                     raise ValueError("PA-OPD top-k JSD coefficient must be non-negative.")
             else:
                 if self.full_logit_distillation:
-                    raise ValueError("PA-OPDVR requires sampled-token distillation unless top-k JSD is enabled.")
+                    raise ValueError("RS-OPSD requires sampled-token distillation unless top-k JSD is enabled.")
                 if self.alpha != 1.0:
-                    raise ValueError("PA-OPDVR requires alpha=1.0 for sampled-token reverse KL.")
+                    raise ValueError("RS-OPSD CAD requires alpha=1.0 for its signed sampled-token objective.")
                 if self.distillation_topk is not None:
-                    raise ValueError("PA-OPDVR does not use top-k/full-vocabulary distillation logits.")
+                    raise ValueError("RS-OPSD does not use top-k/full-vocabulary distillation logits.")
         if self.pa_opd_direct_answer and not self.pa_opd_enabled:
             raise ValueError("pa_opd_direct_answer requires pa_opd_enabled=True.")
         if self.pa_opd_reward_free:
@@ -232,7 +232,7 @@ class SelfDistillationConfig(BaseConfig):
                 raise ValueError("pa_opd_reward_free requires pa_opd_enabled=True.")
             if not self.pa_opd_direct_answer:
                 raise ValueError(
-                    "pa_opd_reward_free is reserved for the no-thinking direct PA-OPDVR protocol."
+                    "pa_opd_reward_free is reserved for the no-thinking direct RS-OPSD protocol."
                 )
         valid_contrastive_negative_modes = [
             "no-image",

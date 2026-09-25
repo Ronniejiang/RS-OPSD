@@ -1,4 +1,4 @@
-"""No-thinking, reward-free direct-answer PA-OPDVR entrypoint for RS_OPD."""
+"""No-thinking, reward-free direct-answer RS-OPSD entrypoint for RS_OPD."""
 
 from __future__ import annotations
 
@@ -62,6 +62,24 @@ def _install_direct_hooks() -> None:
 
     def log_rollout_data_with_direct_metadata(self, batch, reward_extra_infos_dict, timing_raw, rollout_data_dir):
         extras = dict(reward_extra_infos_dict)
+        # The image tensors/paths may be consumed by the rollout worker. Keep
+        # auditable original paths in extra_info, which survives batch routing.
+        if "extra_info" in batch.non_tensor_batch:
+            rows = _as_python_list(batch.non_tensor_batch["extra_info"])
+            for source, target in (
+                ("source_line", "pa_opd_source_line"),
+                ("source_name", "pa_opd_source_name"),
+                ("source_jsonl", "pa_opd_source_jsonl"),
+                ("image_max_side", "pa_opd_image_max_side"),
+                ("student_image_path", "pa_opd_student_image_path"),
+                ("full_image_path", "pa_opd_full_image_path"),
+                ("crop_image_path", "pa_opd_crop_image_path"),
+                ("derived_teacher_image", "pa_opd_derived_image_path"),
+                ("student_image_mode", "pa_opd_student_image_mode"),
+                ("teacher_full_image_mode", "pa_opd_teacher_full_image_mode"),
+                ("student_red_box_hint", "pa_opd_student_red_box_hint"),
+            ):
+                extras.setdefault(target, [row.get(source) for row in rows])
         for key in (
             "pa_opd_direct_answer_valid",
             "pa_opd_direct_answer_correct",
@@ -83,7 +101,7 @@ def _install_direct_hooks() -> None:
 
     def fit_with_direct_protocol(self, *args, **kwargs):
         if not hasattr(self, "actor_rollout_wg"):
-            raise RuntimeError("Direct PA-OPDVR hooks require init_workers() before fit()")
+            raise RuntimeError("Direct RS-OPSD hooks require init_workers() before fit()")
 
         worker_group = self.actor_rollout_wg
         original_update_actor = worker_group.update_actor
@@ -95,13 +113,13 @@ def _install_direct_hooks() -> None:
             ground_truths = _as_python_list(batch.non_tensor_batch.get("reward_model", []))
             extras = _as_python_list(batch.non_tensor_batch.get("extra_info", []))
             if len(ground_truths) != len(batch) or len(extras) != len(batch):
-                raise RuntimeError("Direct PA-OPDVR batch metadata does not align with rollout rows")
+                raise RuntimeError("Direct RS-OPSD batch metadata does not align with rollout rows")
 
             option_labels_per_row = []
             canonical_targets = []
             for row_idx, (ground_truth, extra) in enumerate(zip(ground_truths, extras, strict=True)):
                 if not isinstance(extra, dict) or not extra.get("option_labels"):
-                    raise ValueError(f"Direct PA-OPDVR missing option_labels for rollout row {row_idx}")
+                    raise ValueError(f"Direct RS-OPSD missing option_labels for rollout row {row_idx}")
                 option_labels = extra["option_labels"]
                 target = ground_truth.get("ground_truth") if isinstance(ground_truth, dict) else None
                 if target is None:

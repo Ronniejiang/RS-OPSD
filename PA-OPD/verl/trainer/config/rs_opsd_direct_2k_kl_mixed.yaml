@@ -1,0 +1,31 @@
+# Natural-size concatenation, shuffled by the normal stateful train sampler.
+defaults:
+  - rs_opsd_direct_2k_kl
+  - _self_
+
+data:
+  train_files:
+    - ${oc.env:PA_OPD_TRAIN_FILE,''}
+    - ${oc.env:PA_OPD_VISIONOPD_ROOT}/train.jsonl
+  pa_opd_student_image_mode: bbox_images
+  pa_opd_teacher_full_image_mode: bbox_images
+  pa_opd_separate_teacher_views: true
+  pa_opd_image_max_side: 2048
+  pa_opd_source_name: geoevidence
+  pa_opd_source_overrides:
+    - path: ${oc.env:PA_OPD_VISIONOPD_ROOT}/train.jsonl
+      # VisionOPD images/ already contains the red-box overlay.
+      student_image_mode: native_bbox
+      teacher_full_image_mode: native_bbox
+      source_name: visionopd
+  shuffle: true
+
+actor_rollout_ref:
+  actor:
+    self_distillation:
+      teacher_image_key: teacher_images
+
+trainer:
+  group_name: rs-opsd-direct-2k-kl-geoevidence-visionopd
+  # This experiment starts from the base model, never an earlier data mixture.
+  resume_mode: disable

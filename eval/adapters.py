@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from io import BytesIO
 import json
 from pathlib import Path
 from typing import Any, Iterator
@@ -156,35 +157,98 @@ def iter_mme_remote_sensing(root: Path) -> Iterator[EvalSample]:
 
 
 def _load_xlrs(root: Path):
-    try:
-        from datasets import load_from_disk
-    except ImportError as error:
-        raise ImportError("XLRS-Bench evaluation requires 'datasets'. Install it with: pip install datasets") from error
-
+    """Load XLRS through ``datasets`` when its optional dependencies agree."""
     if not root.is_dir():
         raise FileNotFoundError(f"XLRS-Bench dataset was not found: {root}")
+    try:
+        from datasets import load_from_disk
+    except ImportError:
+        # Some inference images bundle a datasets release that is incompatible
+        # with their huggingface_hub release.  The on-disk Arrow shards are
+        # self-contained, so callers can safely use the native fallback.
+        return None
     dataset_dict = load_from_disk(str(root))
     if "train" not in dataset_dict:
         raise ValueError(f"XLRS-Bench has no train split: {root}")
     return dataset_dict["train"]
 
 
+def _xlrs_arrow_paths(root: Path) -> list[Path]:
+    paths = sorted((root / "train").glob("*.arrow"))
+    if not paths:
+        raise FileNotFoundError(f"XLRS-Bench Arrow shards were not found: {root / 'train'}")
+    return paths
+
+
+def _arrow_batches(path: Path):
+    """Yield record batches from either Arrow stream or file containers."""
+    try:
+        import pyarrow.ipc as ipc
+    except ImportError as error:
+        raise ImportError("XLRS-Bench evaluation needs either datasets or pyarrow.") from error
+
+    with path.open("rb") as source:
+        try:
+            reader = ipc.open_stream(source)
+        except Exception:
+            source.seek(0)
+            reader = ipc.open_file(source)
+        if hasattr(reader, "num_record_batches"):
+            for index in range(reader.num_record_batches):
+                yield reader.get_batch(index)
+        else:
+            yield from reader
+
+
+def _iter_xlrs_arrow_rows(root: Path) -> Iterator[dict[str, Any]]:
+    for path in _xlrs_arrow_paths(root):
+        for batch in _arrow_batches(path):
+            yield from batch.to_pylist()
+
+
+def _xlrs_arrow_count(root: Path) -> int:
+    return sum(batch.num_rows for path in _xlrs_arrow_paths(root) for batch in _arrow_batches(path))
+
+
+def _xlrs_image_from_arrow(root: Path, images: list[dict[str, Any]]) -> Image.Image:
+    if not images:
+        raise ValueError("XLRS sample has no image")
+    image = images[0]
+    encoded = image.get("bytes")
+    if encoded:
+        with Image.open(BytesIO(encoded)) as decoded:
+            return decoded.convert("RGB").copy()
+    relative_path = image.get("path")
+    if relative_path:
+        image_path = root / str(relative_path)
+        with Image.open(image_path) as decoded:
+            return decoded.convert("RGB").copy()
+    raise ValueError("XLRS image has neither encoded bytes nor a path")
+
+
 def inspect_xlrs(root: Path) -> DatasetInspection:
     dataset = _load_xlrs(root)
-    return DatasetInspection("xlrs-bench", len(dataset), len(dataset), None, str(root))
+    total = len(dataset) if dataset is not None else _xlrs_arrow_count(root)
+    return DatasetInspection("xlrs-bench", total, total, None, str(root))
 
 
 def iter_xlrs(root: Path) -> Iterator[EvalSample]:
     dataset = _load_xlrs(root)
-    for row in dataset:
+    rows = dataset if dataset is not None else _iter_xlrs_arrow_rows(root)
+    # ``index`` is a source-local field and repeats throughout XLRS.  A
+    # dataset-order position is deterministic for both the datasets and Arrow
+    # readers and, unlike ``index``, is unique across all 3,080 samples.  This
+    # is essential for resume correctness.
+    for row_position, row in enumerate(rows):
         images = row["image"]
         if not images:
             continue
         category = str(row["category"])
+        image_ref = images[0] if dataset is not None else _xlrs_image_from_arrow(root, images)
         yield EvalSample(
             dataset="xlrs-bench",
-            sample_id=f"xlrs-{row['index']}",
-            image_ref=images[0],
+            sample_id=f"xlrs-{row_position}",
+            image_ref=image_ref,
             image_display_path=str(row.get("path", "")),
             question=str(row["question"]),
             ground_truth=str(row["answer"]),

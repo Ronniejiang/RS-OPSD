@@ -1,4 +1,4 @@
-"""Standalone regression tests for GT-safe direct PA-OPDVR top-k JSD."""
+"""Standalone regression tests for GT-safe direct RS-OPSD top-k JSD."""
 
 from types import SimpleNamespace
 

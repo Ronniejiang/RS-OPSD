@@ -17,3 +17,5 @@ ray_results/
 *.tmp
 
 .DS_Store
+.fuyao-home/
+.fuyao/

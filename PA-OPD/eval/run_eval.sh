@@ -2,14 +2,14 @@
 set -euo pipefail
 
 # =============================================================================
-# OPD-V evaluation script
+# RS-OPSD evaluation script
 #
 # Supported benchmarks:
 #   vstar, zoombench, hrbench-4k, hrbench-8k, mme-realworld, mme-realworld-cn
 #
 # Usage:
 #   API_BASE="http://localhost:8000/v1/" \
-#   OPENAI_MODEL_ID="OPD-V" \
+#   OPENAI_MODEL_ID="your-served-model-name" \
 #   BENCHMARK="vstar,zoombench,hrbench-4k,hrbench-8k,mme-realworld,mme-realworld-cn" \
 #   bash eval/run_eval.sh
 # =============================================================================

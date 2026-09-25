@@ -90,6 +90,7 @@ class ResourcePoolManager:
     resource_pool_spec: dict[str, list[int]]
     mapping: dict[Role, str]
     resource_pool_dict: dict[str, RayResourcePool] = field(default_factory=dict)
+    max_colocate_count: int = 3
 
     def create_resource_pool(self):
         """Create Ray resource pools for distributed training.
@@ -99,13 +100,16 @@ class ResourcePoolManager:
         For FSDP backend, uses max_colocate_count=1 to merge WorkerGroups.
         For Megatron backend, uses max_colocate_count>1 for different models.
         """
+        if self.max_colocate_count < 1:
+            raise ValueError("max_colocate_count must be a positive integer")
         for resource_pool_name, process_on_nodes in self.resource_pool_spec.items():
             # max_colocate_count means the number of WorkerGroups (i.e. processes) in each RayResourcePool
             # For FSDP backend, using max_colocate_count=3: actor_critic_ref, rollout, reward model (optional)
             # For Megatron backend, we recommend using max_colocate_count>1
             # that can utilize different WorkerGroup for differnt models
             resource_pool = RayResourcePool(
-                process_on_nodes=process_on_nodes, use_gpu=True, max_colocate_count=3, name_prefix=resource_pool_name
+                process_on_nodes=process_on_nodes, use_gpu=True,
+                max_colocate_count=self.max_colocate_count, name_prefix=resource_pool_name
             )
             self.resource_pool_dict[resource_pool_name] = resource_pool
 
@@ -718,6 +722,9 @@ class RayPPOTrainer:
 
     @staticmethod
     def _normalize_teacher_image(image: Any) -> Image.Image:
+        if isinstance(image, dict) and image.get("pa_opd_max_side") is not None:
+            from verl.utils.dataset.pa_opd_image import load_capped_image
+            return load_capped_image(image)
         if isinstance(image, Image.Image):
             return image.convert("RGB")
         if isinstance(image, str):
@@ -1016,7 +1023,9 @@ class RayPPOTrainer:
             for item in content:
                 if not isinstance(item, dict) or item.get("type") != "image":
                     continue
-                if "image" in item:
+                if item.get("pa_opd_max_side") is not None:
+                    images.append(RayPPOTrainer._normalize_teacher_image(item))
+                elif "image" in item:
                     images.append(RayPPOTrainer._normalize_teacher_image(item["image"]))
                 elif "path" in item:
                     images.append(RayPPOTrainer._normalize_teacher_image(item["path"]))
@@ -1375,7 +1384,7 @@ class RayPPOTrainer:
         for idx, teacher_messages in enumerate(teacher_messages_list):
             info = extra_info[idx] if idx < len(extra_info) else None
             if not isinstance(info, dict) or not info.get("option_labels"):
-                raise ValueError(f"Direct PA-OPDVR requires option_labels in extra_info for sample {idx}")
+                raise ValueError(f"Direct RS-OPSD requires option_labels in extra_info for sample {idx}")
             answer = None
             if idx < len(reward_model_info) and isinstance(reward_model_info[idx], dict):
                 answer = reward_model_info[idx].get("ground_truth")

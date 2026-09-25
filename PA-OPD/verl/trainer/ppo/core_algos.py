@@ -1082,7 +1082,7 @@ def agg_loss(
     return loss
 
 
-def compute_opdvr_loss(
+def compute_cad_loss(
     student_log_probs: torch.Tensor,
     teacher_log_probs: torch.Tensor,
     semantic_token_mask: torch.Tensor,
@@ -1097,13 +1097,15 @@ def compute_opdvr_loss(
     batch_num_tokens: Optional[int] = None,
     global_batch_size: Optional[int] = None,
     loss_scale_factor: Optional[int] = None,
+    dp_size: int = 1,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
-    """Compute GT-conditioned sampled-token OPDVR on Student trajectories.
+    """Correctness-Aligned Distillation (CAD) on Student answer tokens.
 
-    The implicit Teacher reward is log p_T(y_t) - log p_S(y_t). Correct
-    trajectories retain only positive rewards and incorrect trajectories
-    retain only negative rewards. The resulting signed advantage is detached
-    before multiplying the Student sampled-token log probability.
+    r = sg[log p_T(y_t) - log p_S(y_t)], A = g * R * relu(R * r).
+    The sample gate g is the GT-prefix Teacher probe; R is +1/-1 according
+    to Student answer correctness. Only the sampled Student log probability
+    receives gradients. Gates affect the numerator, not the valid-answer
+    token denominator. Reference KL is a separate, ungated objective.
     """
 
     if student_log_probs.shape != teacher_log_probs.shape:
@@ -1129,15 +1131,15 @@ def compute_opdvr_loss(
         torch.ones_like(correct, dtype=student_log_probs.dtype),
         -torch.ones_like(correct, dtype=student_log_probs.dtype),
     ).unsqueeze(1)
-    implicit_teacher_reward = (teacher_log_probs - student_log_probs).detach()
-    signed_advantage = (sign * torch.relu(sign * implicit_teacher_reward)).detach()
+    teacher_student_gap = (teacher_log_probs - student_log_probs).detach()
+    signed_advantage = (sign * torch.relu(sign * teacher_student_gap)).detach()
     raw_per_token_loss = -signed_advantage * student_log_probs
     weighted_per_token_loss = raw_per_token_loss * reliable.unsqueeze(1)
 
     is_clip = self_distillation_config.is_clip
     if is_clip is not None:
         if old_log_probs is None:
-            raise ValueError("old_log_probs is required for OPDVR IS correction.")
+            raise ValueError("old_log_probs is required for CAD IS correction.")
         negative_approx_kl = (student_log_probs - old_log_probs).detach().clamp(min=-20.0, max=20.0)
         weighted_per_token_loss = weighted_per_token_loss * torch.exp(negative_approx_kl).clamp(max=is_clip)
     if rollout_is_weights is not None:
@@ -1151,19 +1153,19 @@ def compute_opdvr_loss(
     suppress_mask = (signed_advantage < 0).to(loss_mask.dtype) * reliable_token_mask
     active_mask = reinforce_mask + suppress_mask
     metrics = {
-        "opdvr/implicit_teacher_reward_token_mean": (
-            verl_F.masked_sum(implicit_teacher_reward, loss_mask) / valid_token_count
+        "cad/teacher_student_gap_token_mean": (
+            verl_F.masked_sum(teacher_student_gap, loss_mask) / valid_token_count
         ).detach().item(),
-        "opdvr/advantage_abs_token_mean": (
+        "cad/advantage_abs_token_mean": (
             verl_F.masked_sum(signed_advantage.abs() * reliable.unsqueeze(1), loss_mask) / valid_token_count
         ).detach().item(),
-        "opdvr/reinforce_token_fraction": (reinforce_mask.sum() / valid_token_count).detach().item(),
-        "opdvr/suppress_token_fraction": (suppress_mask.sum() / valid_token_count).detach().item(),
-        "opdvr/active_token_fraction": (active_mask.sum() / valid_token_count).detach().item(),
-        "opdvr/teacher_reliable_fraction": reliable.mean().detach().item(),
-        "opdvr/trajectory_correct_fraction": correct.float().mean().detach().item(),
-        "opdvr/num_semantic_tokens": loss_mask.sum().detach().item(),
-        "opdvr/empty_target_batch": float(loss_mask.sum().detach().item() == 0),
+        "cad/reinforce_token_fraction": (reinforce_mask.sum() / valid_token_count).detach().item(),
+        "cad/suppress_token_fraction": (suppress_mask.sum() / valid_token_count).detach().item(),
+        "cad/active_token_fraction": (active_mask.sum() / valid_token_count).detach().item(),
+        "cad/teacher_reliable_fraction": reliable.mean().detach().item(),
+        "cad/trajectory_correct_fraction": correct.float().mean().detach().item(),
+        "cad/num_answer_tokens": loss_mask.sum().detach().item(),
+        "cad/empty_target_batch": float(loss_mask.sum().detach().item() == 0),
     }
     loss = agg_loss(
         loss_mat=weighted_per_token_loss,
@@ -1172,6 +1174,7 @@ def compute_opdvr_loss(
         batch_num_tokens=batch_num_tokens,
         global_batch_size=global_batch_size,
         loss_scale_factor=loss_scale_factor,
+        dp_size=dp_size,
     )
     return loss, metrics
 
@@ -1195,6 +1198,7 @@ def compute_pa_opd_safe_topk_jsd_loss(
     batch_num_tokens: Optional[int] = None,
     global_batch_size: Optional[int] = None,
     loss_scale_factor: Optional[int] = None,
+    dp_size: int = 1,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     """JSD on a shared top-k support with non-GT answer choices removed."""
 
@@ -1287,6 +1291,7 @@ def compute_pa_opd_safe_topk_jsd_loss(
         batch_num_tokens=batch_num_tokens,
         global_batch_size=global_batch_size,
         loss_scale_factor=loss_scale_factor,
+        dp_size=dp_size,
     )
     return loss, metrics
 

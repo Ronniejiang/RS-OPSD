@@ -167,6 +167,24 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 init_method=os.environ.get("DIST_INIT_METHOD", None),
             )
 
+        if os.environ.get("PA_OPD_VALIDATE_GPU_ASSIGNMENT") == "1":
+            import ray
+
+            # Validate before loading any weights. Ray fractional-GPU placement
+            # on some runtimes can assign several FSDP ranks the same device.
+            context = ray.get_runtime_context()
+            assigned = context.get_accelerator_ids().get("GPU", [])
+            identity = (context.get_node_id(), tuple(str(x) for x in assigned))
+            assignments = [None] * torch.distributed.get_world_size()
+            torch.distributed.all_gather_object(assignments, identity)
+            if not assigned or len(set(assignments)) != len(assignments):
+                raise RuntimeError(
+                    f"Duplicate or missing training GPU assignments: {assignments}. "
+                    "Use trainer.ray_max_colocate_count=1 for this hybrid FSDP recipe."
+                )
+            if torch.distributed.get_rank() == 0:
+                print(f"PA-OPD GPU assignment verified: {len(assignments)} unique training devices", flush=True)
+
         # build device mesh for FSDP
         world_size = torch.distributed.get_world_size()
         # TODO(sgm): support FSDP hybrid shard for larger model
@@ -373,7 +391,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         # NOTE(fix me): tie_word_embedding causes meta_tensor init to hang
         init_context = get_init_weight_context_manager(
-            use_meta_tensor=not actor_model_config.tie_word_embeddings, mesh=self.device_mesh
+            use_meta_tensor=not actor_model_config.tie_word_embeddings, mesh=self.device_mesh,
+            sync_module_states=(self.config.actor.strategy != "fsdp" or fsdp_config.sync_module_states),
         )
 
         with init_context(), warnings.catch_warnings():
@@ -527,6 +546,8 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         cpu_offload = None if role == "actor" else CPUOffload(offload_params=True)
         fsdp_strategy = self.config.actor.strategy
         if fsdp_strategy == "fsdp":
+            if self.rank == 0:
+                print(f"FSDP sync_module_states: {fsdp_config.sync_module_states}")
             actor_module_fsdp = FSDP(
                 actor_module,
                 cpu_offload=cpu_offload,
@@ -535,7 +556,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 device_id=get_device_id(),
                 sharding_strategy=sharding_strategy,  # zero3
                 mixed_precision=mixed_precision,
-                sync_module_states=True,
+                sync_module_states=fsdp_config.sync_module_states,
                 device_mesh=self.device_mesh,
                 use_orig_params=self.use_orig_params,
                 forward_prefetch=fsdp_config.get("forward_prefetch", False),
@@ -910,6 +931,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                         if self.rank == 0:
                             print("self-distillation fixed teacher model:", teacher_model_path)
                         teacher_local_path = copy_to_local(teacher_model_path, use_shm=use_shm)
+                        # Building another backbone must not replace the Student's
+                        # tokenizer/processor/generation metadata used by exports.
+                        student_metadata = (self.tokenizer, self.processor, self.generation_config)
                         self.teacher_module_fsdp = self._build_model_optimizer(
                             model_path=teacher_local_path,
                             fsdp_config=omega_conf_to_dataclass(self.config.ref.fsdp_config),
@@ -924,6 +948,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                             use_tiled_mlp=ref_use_tiled_mlp,
                             tiled_mlp_shards=ref_tiled_mlp_shards,
                         )[0]
+                        self.tokenizer, self.processor, self.generation_config = student_metadata
+                        if not self_distillation_cfg.get("fixed_teacher_ema", False):
+                            self.teacher_module_fsdp.requires_grad_(False)
+                            self.teacher_module_fsdp.eval()
                         self.actor.teacher_module = self.teacher_module_fsdp
                     elif teacher_regularization == "trust-region":
                         self.actor.teacher_module = TrustRegionTeacher(
@@ -946,8 +974,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             # The original legacy VOPD EMA teacher reuses ``ref_module_fsdp``.
             # With actor KL, that module must remain frozen as the KL reference,
             # so PA-OPD can explicitly construct a fixed-initialized, separately
-            # sharded EMA teacher instead. Persist either EMA teacher separately
-            # from the student checkpoint for strict resume semantics.
+            # sharded EMA teacher instead. Persist fixed (including non-EMA)
+            # teachers too, for self-contained strict resume and final validation.
+            # Keep the historical manager attribute name for save/load callers.
             self.ema_teacher_checkpoint_manager = None
             self_distillation_cfg = self.config.actor.get("self_distillation", None)
             teacher_model_source = (
@@ -955,12 +984,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 if self_distillation_cfg is not None
                 else None
             )
-            fixed_teacher_ema = bool(
-                self_distillation_cfg.get("fixed_teacher_ema", False)
-                if self_distillation_cfg is not None
-                else False
-            )
-            uses_ema_teacher = (
+            uses_checkpointed_teacher = (
                 self_distillation_cfg is not None
                 and self.config.actor.policy_loss.get("loss_mode", "vanilla") == "vopd"
                 and (
@@ -968,17 +992,17 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                         teacher_model_source == "legacy"
                         and self_distillation_cfg.get("teacher_regularization", "ema") in {"ema", "progressive"}
                     )
-                    or (teacher_model_source == "fixed" and fixed_teacher_ema)
+                    or teacher_model_source == "fixed"
                 )
             )
-            if uses_ema_teacher:
+            if uses_checkpointed_teacher:
                 if teacher_model_source == "legacy":
                     if not hasattr(self, "ref_module_fsdp"):
                         raise RuntimeError("VOPD EMA teacher requires ref_module_fsdp for checkpointing.")
                     ema_teacher_model = self.ref_module_fsdp
                 else:
                     if not hasattr(self, "teacher_module_fsdp"):
-                        raise RuntimeError("fixed_teacher_ema requires teacher_module_fsdp for checkpointing.")
+                        raise RuntimeError("fixed teacher requires teacher_module_fsdp for checkpointing.")
                     ema_teacher_model = self.teacher_module_fsdp
                 self.ema_teacher_checkpoint_manager = FSDPCheckpointManager(
                     model=ema_teacher_model,
@@ -988,7 +1012,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                     checkpoint_config={"load_contents": ["model"], "save_contents": ["model"]},
                 )
                 if self.rank == 0:
-                    print("VOPD strict resume: EMA teacher checkpointing is enabled.")
+                    print("VOPD strict resume: separate teacher checkpointing is enabled.")
 
         if not self._is_actor and self._is_rollout:
             # If ActorRolloutRefWorker is initialized as a standalone rollout,
@@ -1275,7 +1299,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             )
             if not os.path.isfile(teacher_shard_path):
                 raise FileNotFoundError(
-                    "Strict VOPD resume requires the EMA teacher checkpoint, but it is missing: "
+                    "Strict VOPD resume requires the separate teacher checkpoint, but it is missing: "
                     f"{teacher_shard_path}. Use a checkpoint produced by the updated PA-OPD code, "
                     "or start a new run instead of resuming this legacy checkpoint."
                 )
@@ -1285,7 +1309,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 del_local_after_load=del_local_after_load,
             )
             if self.rank == 0:
-                print(f"Loaded VOPD EMA teacher checkpoint from: {teacher_local_path}")
+                print(f"Loaded VOPD teacher checkpoint from: {teacher_local_path}")
 
         if self._is_offload_param:
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)

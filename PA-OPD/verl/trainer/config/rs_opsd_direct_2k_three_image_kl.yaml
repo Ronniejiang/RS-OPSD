@@ -1,10 +1,10 @@
-# 2K direct OPDVR+KL with a full/derived/tight three-image privileged Teacher.
+# RS-OPSD: CPVP (Global/Contextual/Fine-grained Evidence) with CAD + Reference KL.
 # A 2048px Qwen3-VL image can occupy 16,384 visual positions in verl's
 # unmerged sequence. Student/ref therefore need room for that image plus the
 # direct-answer response. The privileged Teacher consumes three such images,
 # so its independent re-prompt ceiling must accommodate all three views.
 defaults:
-  - pa_opdvr_direct_2k_kl
+  - rs_opsd_direct_2k_kl
   - _self_
 
 # 24,576 prompt positions + 16 direct-answer positions, with a small safety
@@ -32,8 +32,8 @@ data:
   max_prompt_length: 24576
 
 trainer:
-  group_name: pa-opdvr-direct-2k-three-image-kl
-  experiment_name: ${oc.env:PA_OPD_RUN_NAME,pa-opdvr-direct-2k-three-image-kl}
-  n_gpus_per_node: ${oc.env:PA_OPD_NUM_GPUS,4}
-  default_local_dir: ${oc.env:PA_OPD_WORK_DIR,outputs/pa-opdvr-direct-2k-three-image-kl}/checkpoints
-  rollout_data_dir: ${oc.env:PA_OPD_WORK_DIR,outputs/pa-opdvr-direct-2k-three-image-kl}/rollouts
+  group_name: rs-opsd-direct-2k-three-image-kl
+  experiment_name: ${oc.env:PA_OPD_RUN_NAME,rs-opsd-direct-2k-three-image-kl}
+  n_gpus_per_node: ${oc.decode:${oc.env:PA_OPD_GPUS_PER_NODE,4}}
+  default_local_dir: ${oc.env:PA_OPD_WORK_DIR,outputs/rs-opsd-direct-2k-three-image-kl}/checkpoints
+  rollout_data_dir: ${oc.env:PA_OPD_WORK_DIR,outputs/rs-opsd-direct-2k-three-image-kl}/rollouts

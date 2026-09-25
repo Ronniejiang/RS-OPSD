@@ -85,6 +85,27 @@ interface. Use `--image-format jpeg --jpeg-quality 95` if request payloads are
 too large. `--max-pixels` bounds the image area before encoding (default:
 16,777,216 pixels).
 
+### Local Transformers fallback
+
+`run_local_vllm.sh` remains the preferred launcher when the installed vLLM
+version natively supports the model. On a machine with an older or
+vendor-customized vLLM that cannot load the VLM, use the direct Transformers
+backend instead. It preserves the same adapters, prompts, image pixel limit,
+answer parsing, and per-record JSONL output, but deliberately evaluates one
+sample at a time on the local GPU.
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+PYTHON=/path/to/python-with-torch-and-transformers \
+MODEL_PATH=/path/to/Qwen3-VL-8B-Instruct \
+MODEL_ID=qwen3-vl-8b-instruct \
+BENCHMARK=lrs-vqa,mme-realworld-rs,xlrs-bench \
+LRS_ROOT=/path/to/LRS-VQA \
+MME_ROOT=/path/to/MME-RealWorld \
+XLRS_ROOT=/path/to/XLRS-Bench \
+bash eval/scripts/run_local_transformers.sh
+```
+
 There is also an environment-variable launcher:
 
 ```bash
@@ -107,7 +128,13 @@ top level of `eval/`. Canonical runnable helpers are in `eval/scripts/`:
 - `run_openai_compatible.sh`: evaluate an already-running model endpoint.
 - `run_local_vllm.sh`: validate layouts, start vLLM, verify the expected model
   identity, evaluate, then stop the server.
+- `run_local_transformers.sh`: directly run a local Hugging Face VLM when a
+  compatible vLLM is unavailable.
 - `create_vllm_env.sh`: optionally create a reproducible vLLM environment.
+- `probe_ppu_vllm_runtime.sh`: verify that a PPU image has a usable PPU2
+  runtime, vLLM, and native Qwen3-VL implementation.
+- Scheduler-specific submission scripts and historical result snapshots are
+  local-only and are not distributed with the public evaluator.
 - `merge_fsdp_checkpoint_to_hf.sh`: merge a `verl` FSDP actor checkpoint.
 - `merge_lora_adapter_to_hf.sh`: merge a PEFT LoRA adapter into a standalone
   Hugging Face model directory.
@@ -137,6 +164,17 @@ VERL_ROOT=/path/to/verl \
 PYTHON=/path/to/python \
 bash eval/scripts/merge_fsdp_checkpoint_to_hf.sh /path/to/global_step_N
 ```
+
+### PPU evaluation
+
+Inside an allocated PPU runtime, use `probe_ppu_vllm_runtime.sh` to verify
+the installed stack, then run `run_local_vllm.sh` with explicit paths as above.
+Scheduler configuration, image repositories and submission wrappers are local
+deployment details and are not included in this repository.
+
+For a full benchmark run, use `BENCHMARK=all LIMIT=` and a unique `RUN_NAME`.
+A 4K image at a 16 MP cap can require roughly 15.7K visual tokens; choose
+`MAX_MODEL_LEN=32768` or reduce `MAX_PIXELS` to fit a smaller context budget.
 
 The strict `correct` / `accuracy` fields are never changed by tolerant LRS-VQA
 scoring. The optional tolerant score first applies a small audited alias table

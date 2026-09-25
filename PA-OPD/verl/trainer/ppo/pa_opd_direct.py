@@ -1,4 +1,4 @@
-"""Direct-answer PA-OPDVR helpers for RS-OPD multi-select questions."""
+"""Direct-answer RS-OPSD helpers for RS-OPD multi-select questions."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def _one_token_suffix(tokenizer: Any, prefix: str, continuation: str) -> int:
     suffix = full_ids[len(prefix_ids) :]
     if len(suffix) != 1:
         raise ValueError(
-            "Direct PA-OPDVR constrained probe requires every option continuation "
+            "Direct RS-OPSD constrained probe requires every option continuation "
             f"to be one Qwen BPE token; prefix={prefix[-32:]!r}, continuation={continuation!r}, "
             f"suffix={suffix!r}"
         )
@@ -59,13 +59,15 @@ def build_direct_probe_plan(
     option_labels: Iterable[Any],
     ground_truth: Any,
 ) -> DirectProbePlan:
-    """Build a constrained greedy Teacher reliability probe.
+    """Build CAD's GT-prefix constrained-greedy Teacher reliability probe.
 
     At every generated label position the Teacher competes only against labels
     that make a valid canonical option set.  After each selected label it may
     either emit EOS or append a later unselected label.  This checks the exact
     multi-select answer, including whether Teacher stops at the correct set,
-    without duplicating the two-image visual prompt for all 15 subsets.
+    without generating a separate Teacher trajectory. The first step requires
+    a label (no empty answer); every later step allows EOS. Ties after the
+    first label prefer EOS, consistently with the terminal step.
     """
 
     labels = normalize_option_labels(option_labels)
@@ -73,7 +75,7 @@ def build_direct_probe_plan(
     selected = tuple(canonical.split(","))
     eos_token_id = getattr(tokenizer, "eos_token_id", None)
     if eos_token_id is None:
-        raise ValueError("Direct PA-OPDVR probe requires a tokenizer EOS token")
+        raise ValueError("Direct RS-OPSD probe requires a tokenizer EOS token")
 
     response_ids: list[int] = []
     allowed_ids: list[tuple[int, ...]] = []
@@ -88,6 +90,10 @@ def build_direct_probe_plan(
             legal_text = ["," + candidate for candidate in labels[previous_position + 1 :]]
             target_text = "," + label
         legal_ids = tuple(_one_token_suffix(tokenizer, prompt_text + prefix_answer, text) for text in legal_text)
+        if selected_index > 0:
+            # Early termination must compete with the next GT label; otherwise
+            # a Teacher preferring only A could incorrectly pass a GT A,B probe.
+            legal_ids = (int(eos_token_id),) + legal_ids
         target_id = _one_token_suffix(tokenizer, prompt_text + prefix_answer, target_text)
         if target_id not in legal_ids:
             raise RuntimeError("GT answer transition is absent from its constrained probe grammar")
@@ -159,7 +165,7 @@ def build_direct_option_token_mask(
         offsets = list(encoded["offset_mapping"])
         if roundtrip_ids != token_ids:
             raise ValueError(
-                "Direct PA-OPDVR cannot align decoded response text back to Qwen BPE ids; "
+                "Direct RS-OPSD cannot align decoded response text back to Qwen BPE ids; "
                 f"row={row_idx}, original_len={len(token_ids)}, roundtrip_len={len(roundtrip_ids)}"
             )
         for content_index, (start, end) in enumerate(offsets):

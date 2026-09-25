@@ -164,7 +164,29 @@ def summarize_records(records: list[dict[str, Any]], *, include_breakdowns: bool
         if similarities:
             summary["mean_semantic_similarity"] = sum(similarities) / len(similarities)
     if include_breakdowns:
-        summary["by_category"] = _group_summary(records, "category")
+        by_category = _group_summary(records, "category")
+        summary["by_category"] = by_category
+        if by_category:
+            # Unlike ``accuracy``, this macro average gives every annotated
+            # category the same weight, independent of its sample count.
+            summary["macro_category_accuracy"] = sum(
+                float(category_summary["accuracy"])
+                for category_summary in by_category.values()
+            ) / len(by_category)
+
+            # LRS-VQA optionally has a second, tolerant score.  Keep the
+            # corresponding category macro metric available only when every
+            # category has been annotated with that score.
+            tolerant_category_summaries = [
+                category_summary
+                for category_summary in by_category.values()
+                if "tolerant_accuracy" in category_summary
+            ]
+            if len(tolerant_category_summaries) == len(by_category):
+                summary["macro_category_tolerant_accuracy"] = sum(
+                    float(category_summary["tolerant_accuracy"])
+                    for category_summary in tolerant_category_summaries
+                ) / len(tolerant_category_summaries)
         if records and records[0].get("dataset") == "lrs-vqa":
             summary["by_source"] = _group_summary(records, "source")
             summary["by_size_bin"] = _group_summary(records, "size_bin")

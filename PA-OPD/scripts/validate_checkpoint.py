@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail fast when a PA-OPDVR FSDP checkpoint cannot be resumed safely."""
+"""Fail fast when a RS-OPSD FSDP checkpoint cannot be resumed safely."""
 
 from __future__ import annotations
 
@@ -49,11 +49,11 @@ def main() -> int:
     args = parser.parse_args()
     errors = validate(args.checkpoint.resolve(), args.world_size)
     if errors:
-        print("PA-OPDVR resume checkpoint is incomplete:", file=sys.stderr)
+        print("RS-OPSD resume checkpoint is incomplete:", file=sys.stderr)
         for error in errors:
             print(f"  - {error}", file=sys.stderr)
         return 1
-    print(f"PA-OPDVR resume checkpoint is complete: {args.checkpoint.resolve()} (world_size={args.world_size})")
+    print(f"RS-OPSD resume checkpoint is complete: {args.checkpoint.resolve()} (world_size={args.world_size})")
     return 0
 
 

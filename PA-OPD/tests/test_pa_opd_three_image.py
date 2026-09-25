@@ -1,4 +1,4 @@
-"""Regression coverage for the full/derived/tight direct PA-OPDVR recipe."""
+"""Regression coverage for the full/derived/tight direct RS-OPSD recipe."""
 
 from __future__ import annotations
 
@@ -88,8 +88,8 @@ def test_three_image_loader_rejects_misaligned_derived_annotation() -> None:
 
 def test_three_image_config_preserves_direct_2k_kl_protocol_with_safe_student_and_teacher_contexts() -> None:
     root = Path(__file__).resolve().parents[1]
-    config = (root / "verl/trainer/config/pa_opdvr_direct_2k_three_image_kl.yaml").read_text()
-    assert "pa_opdvr_direct_2k_kl" in config
+    config = (root / "verl/trainer/config/rs_opsd_direct_2k_three_image_kl.yaml").read_text()
+    assert "rs_opsd_direct_2k_kl" in config
     assert "pa_opd_direct_three_image_jsonl: true" in config
     assert "teacher_image_key: teacher_images" in config
     assert "teacher_input_mode: global_plus_derived_plus_crop" in config
@@ -97,7 +97,7 @@ def test_three_image_config_preserves_direct_2k_kl_protocol_with_safe_student_an
     assert "ppo_max_token_len_per_gpu: 25088" in config
     assert "max_reprompt_len: 65536" in config
     assert "max_prompt_length: 24576" in config
-    assert "n_gpus_per_node: ${oc.env:PA_OPD_NUM_GPUS,4}" in config
+    assert "n_gpus_per_node: ${oc.decode:${oc.env:PA_OPD_GPUS_PER_NODE,4}}" in config
 
 
 def test_three_image_teacher_mode_is_valid_for_direct_pa_opd() -> None:

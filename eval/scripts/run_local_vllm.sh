@@ -24,6 +24,7 @@ HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-}"
 API_BASE="${API_BASE:-}"
 TP_SIZE="${TP_SIZE:-4}"
+DATA_PARALLEL_SIZE="${DATA_PARALLEL_SIZE:-}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-}"
 VLLM_EXTRA_ARGS="${VLLM_EXTRA_ARGS:-}"
@@ -85,6 +86,18 @@ echo "Model endpoint: ${API_BASE}; expected model: ${SERVED_MODEL_NAME}"
 echo "Checking benchmark layouts before loading the model..."
 "${PYTHON}" -m eval.run "${DATASET_ARGS[@]}" --dry-run
 
+if [[ -n "${LRS_SEMANTIC_MODEL}" ]]; then
+  echo "Checking local LRS semantic model before starting vLLM: ${LRS_SEMANTIC_MODEL}"
+  "${PYTHON}" - "${LRS_SEMANTIC_MODEL}" <<'PY'
+from pathlib import Path
+import sys
+from eval.lrs_semantic import BGEEmbedder, LRSSemanticConfig
+scorer = BGEEmbedder(LRSSemanticConfig(Path(sys.argv[1])))
+scorer.score_pairs([("rectangle", "rectangular")])
+print("LRS semantic model loaded successfully on CPU", flush=True)
+PY
+fi
+
 mkdir -p "${OUT_ROOT}" "$(dirname "${SERVER_LOG}")"
 server_pid=""
 cleanup() {
@@ -118,6 +131,7 @@ else
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION}"
     --trust-remote-code
   )
+  [[ -n "${DATA_PARALLEL_SIZE}" ]] && VLLM_ARGS+=(--data-parallel-size "${DATA_PARALLEL_SIZE}")
   [[ -n "${MAX_MODEL_LEN}" ]] && VLLM_ARGS+=(--max-model-len "${MAX_MODEL_LEN}")
   # Extra options are explicitly supplied by the caller, e.g. VLLM_EXTRA_ARGS='--enforce-eager'.
   [[ -n "${VLLM_EXTRA_ARGS}" ]] && read -r -a EXTRA_ARGS <<< "${VLLM_EXTRA_ARGS}" && VLLM_ARGS+=("${EXTRA_ARGS[@]}")

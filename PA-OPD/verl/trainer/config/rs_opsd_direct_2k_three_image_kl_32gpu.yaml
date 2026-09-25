@@ -1,0 +1,38 @@
+# Fresh 2-node x 16-PPU experiment, using the corrected global token mean.
+defaults:
+  - rs_opsd_direct_2k_three_image_kl
+  - _self_
+
+actor_rollout_ref:
+  actor:
+    ppo_mini_batch_size: 96
+    ppo_micro_batch_size_per_gpu: 1
+    ppo_epochs: 1
+    loss_agg_mode: token-mean
+    ulysses_sequence_parallel_size: 1
+    checkpoint:
+      save_contents: [model, optimizer, extra, hf_model]
+      load_contents: [model, optimizer, extra]
+      hf_model_dir: ${oc.env:PA_OPD_WORK_DIR}/inference
+    self_distillation:
+      pa_opd_topk_jsd_enabled: false
+  rollout:
+    n: 1
+
+data:
+  train_batch_size: 96
+  pa_opd_student_image_mode: bbox_images
+  pa_opd_teacher_full_image_mode: bbox_images
+  pa_opd_separate_teacher_views: true
+
+trainer:
+  n_gpus_per_node: 16
+  nnodes: 2
+  total_epochs: 3
+  # Required explicitly at submission: cadence is in optimizer steps.
+  save_freq: ${oc.decode:${oc.env:PA_OPD_SAVE_FREQ}}
+  max_actor_ckpt_to_keep: 2
+  skip_checkpoint: false
+  resume_mode: disable
+  resume_from_path: null
+  group_name: rs-opsd-direct-2k-three-image-kl-global-token-mean-bs96

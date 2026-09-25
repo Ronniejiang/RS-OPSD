@@ -19,7 +19,7 @@ from .lrs_semantic import (
     write_jsonl_atomic,
 )
 from .metrics import build_prompt, score_prediction, summarize_records
-from .model import OpenAICompatibleGenerator
+from .model import AnswerGenerator, OpenAICompatibleGenerator, TransformersGenerator
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -62,6 +62,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--api-base", "--api_base", default=None, help="OpenAI-compatible server base URL.")
     parser.add_argument("--api-key", "--api_key", default="EMPTY")
     parser.add_argument("--model-id", "--model_id", default=None, help="Model ID exposed by the server.")
+    parser.add_argument(
+        "--backend",
+        choices=("openai", "transformers"),
+        default="openai",
+        help="Inference backend. 'openai' uses an API endpoint; 'transformers' loads --model-path locally.",
+    )
+    parser.add_argument("--model-path", type=_path, default=None, help="Local Hugging Face model for --backend transformers.")
     parser.add_argument("--max-tokens", "--max_tokens", type=int, default=4096)
     parser.add_argument("--max-retries", "--max_retries", type=int, default=3)
     parser.add_argument("--request-timeout", type=float, default=3600.0)
@@ -126,10 +133,15 @@ def parse_args() -> argparse.Namespace:
     else:
         args.lrs_semantic_config = None
     if not args.dry_run:
-        if not args.api_base:
-            parser.error("--api-base is required unless --dry-run is used")
+        if args.backend == "openai" and not args.api_base:
+            parser.error("--api-base is required for --backend openai")
         if not args.model_id:
             parser.error("--model-id is required unless --dry-run is used")
+        if args.backend == "transformers" and args.model_path is None:
+            parser.error("--model-path is required for --backend transformers")
+    if args.backend == "transformers" and args.parallel_workers != 1:
+        print("[config] Transformers backend uses one worker; overriding --parallel-workers to 1.", flush=True)
+        args.parallel_workers = 1
     args.enable_thinking = None if args.enable_thinking is None else args.enable_thinking == "True"
     return args
 
@@ -185,7 +197,7 @@ def record_for_error(sample: EvalSample, error: Exception, elapsed_sec: float = 
     }
 
 
-def _generate_record(sample: EvalSample, generator: OpenAICompatibleGenerator) -> dict[str, Any]:
+def _generate_record(sample: EvalSample, generator: AnswerGenerator) -> dict[str, Any]:
     started = datetime.now(timezone.utc)
     try:
         prediction = generator.generate(sample.load_image(), build_prompt(sample))
@@ -232,7 +244,7 @@ def load_records(path: Path) -> list[dict[str, Any]]:
 def run_dataset(
     dataset: str,
     root: Path,
-    generator: OpenAICompatibleGenerator,
+    generator: AnswerGenerator,
     output_path: Path,
     resume: bool,
     limit: int | None,
@@ -287,7 +299,13 @@ def run_dataset(
 def save_summary(path: Path, summaries: dict[str, Any], args: argparse.Namespace) -> None:
     payload = {
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "model": {"api_base": args.api_base, "model_id": args.model_id, "enable_thinking": args.enable_thinking},
+        "model": {
+            "backend": args.backend,
+            "api_base": args.api_base,
+            "model_id": args.model_id,
+            "model_path": str(args.model_path) if args.model_path is not None else None,
+            "enable_thinking": args.enable_thinking,
+        },
         "inference": {
             "max_tokens": args.max_tokens,
             "max_retries": args.max_retries,
@@ -321,18 +339,26 @@ def main() -> None:
         return
 
     run_dir = args.output_root / resolve_run_name(args)
-    generator = OpenAICompatibleGenerator(
-        api_base=args.api_base,
-        api_key=args.api_key,
-        model_id=args.model_id,
-        max_tokens=args.max_tokens,
-        max_retries=args.max_retries,
-        request_timeout=args.request_timeout,
-        enable_thinking=args.enable_thinking,
-        max_pixels=args.max_pixels,
-        image_format=args.image_format,
-        jpeg_quality=args.jpeg_quality,
-    )
+    if args.backend == "transformers":
+        generator: AnswerGenerator = TransformersGenerator(
+            model_path=args.model_path,
+            max_tokens=args.max_tokens,
+            enable_thinking=args.enable_thinking,
+            max_pixels=args.max_pixels,
+        )
+    else:
+        generator = OpenAICompatibleGenerator(
+            api_base=args.api_base,
+            api_key=args.api_key,
+            model_id=args.model_id,
+            max_tokens=args.max_tokens,
+            max_retries=args.max_retries,
+            request_timeout=args.request_timeout,
+            enable_thinking=args.enable_thinking,
+            max_pixels=args.max_pixels,
+            image_format=args.image_format,
+            jpeg_quality=args.jpeg_quality,
+        )
     semantic_scorer = (
         BGEEmbedder(args.lrs_semantic_config)
         if args.lrs_semantic_config is not None

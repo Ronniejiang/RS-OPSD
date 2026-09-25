@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import base64
+from io import BytesIO
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from PIL import Image
 
-from eval.adapters import EvalSample, resolve_lrs_image
+from eval.adapters import EvalSample, inspect_xlrs, iter_xlrs, resolve_lrs_image
 from eval.lrs_semantic import (
     annotate_lrs_semantic_records,
     canonicalize_lrs_answer,
@@ -45,6 +47,37 @@ class EvalTests(unittest.TestCase):
             Image.new("RGB", (2, 2)).save(image_path)
             self.assertEqual(resolve_lrs_image(root, "LRS_VQA/image/123.tif"), image_path)
 
+    def test_xlrs_arrow_fallback_avoids_datasets_dependency(self) -> None:
+        import pyarrow as pa
+        import pyarrow.ipc as ipc
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            train = root / "train"
+            train.mkdir()
+            encoded = BytesIO()
+            Image.new("RGB", (3, 2), color="red").save(encoded, format="PNG")
+            table = pa.Table.from_pylist([
+                {
+                    "path": "example.png",
+                    "index": 7,
+                    "question": "Question?",
+                    "multi-choice options": ["(A) alpha", "(B) beta"],
+                    "answer": "A",
+                    "category": "category",
+                    "l2-category": "detail",
+                    "image": [{"bytes": encoded.getvalue(), "path": "example.png"}],
+                }
+            ])
+            with pa.OSFile(str(train / "data.arrow"), "wb") as sink:
+                with ipc.new_stream(sink, table.schema) as writer:
+                    writer.write_table(table)
+            with patch("eval.adapters._load_xlrs", return_value=None):
+                self.assertEqual(inspect_xlrs(root).annotations, 1)
+                sample = next(iter_xlrs(root))
+            self.assertEqual(sample.sample_id, "xlrs-0")
+            self.assertEqual(sample.load_image().size, (3, 2))
+
     def test_scoring_for_each_answer_format(self) -> None:
         self.assertTrue(score_prediction(self.make_sample("lrs-vqa", ground_truth="Yes"), " yes. ")["correct"])
         self.assertTrue(score_prediction(self.make_sample("mme-realworld-rs", ground_truth="E"), "(E)")["correct"])
@@ -76,6 +109,7 @@ class EvalTests(unittest.TestCase):
         uri = generator.image_to_data_uri(Image.new("RGB", (10, 10), color="red"))
         self.assertTrue(uri.startswith("data:image/png;base64,"))
         self.assertTrue(base64.b64decode(uri.split(",", 1)[1]))
+        self.assertEqual(generator.prepare_image(Image.new("RGB", (10, 10))).size, (2, 2))
         self.assertEqual(generator.normalize_model_answer("<think>x</think><answer>B</answer>"), "B")
 
     def test_summary_accounts_for_errors(self) -> None:
@@ -85,6 +119,16 @@ class EvalTests(unittest.TestCase):
         ])
         self.assertEqual(summary["accuracy"], 0.5)
         self.assertEqual(summary["total_inference_sec"], 2.0)
+
+    def test_summary_reports_unweighted_category_macro_accuracy(self) -> None:
+        records = [
+            {"dataset": "xlrs-bench", "status": "ok", "correct": False, "metrics": {}, "metadata": {"category": "frequent"}, "elapsed_sec": 1.0},
+            {"dataset": "xlrs-bench", "status": "ok", "correct": False, "metrics": {}, "metadata": {"category": "frequent"}, "elapsed_sec": 1.0},
+            {"dataset": "xlrs-bench", "status": "ok", "correct": True, "metrics": {}, "metadata": {"category": "rare"}, "elapsed_sec": 1.0},
+        ]
+        summary = summarize_records(records)
+        self.assertAlmostEqual(summary["accuracy"], 1 / 3)
+        self.assertAlmostEqual(summary["macro_category_accuracy"], 1 / 2)
 
     def test_lrs_tolerant_semantic_scoring_keeps_strict_results(self) -> None:
         class FakeSimilarity:

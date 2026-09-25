@@ -31,7 +31,12 @@ def wait_for_model(api_base: str, model_id: str, timeout: float, pid: int | None
     successes = 0
     while time.monotonic() < deadline:
         if pid is not None:
-            os.kill(pid, 0)
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError as error:
+                raise RuntimeError(
+                    f"Model server process {pid} exited before becoming ready."
+                ) from error
         try:
             with opener.open(api_base.rstrip("/") + "/models", timeout=5) as response:
                 payload = json.load(response)

@@ -30,6 +30,8 @@ _DIRECT_OPTION_INSTRUCTION = (
 _OPTION_LINE_RE = re.compile(r"(?m)^\s*([A-Za-z])\.\s+")
 
 
+# CPVP (Context-Preserving Visual Privilege): ordered Global, Contextual,
+# and Fine-grained Evidence. Load existing views; do not recrop images here.
 # Keep the privileged three-view contract aligned with
 # eval/rs_opd_original_teacher_crops_three_images.py. These instructions are
 # Teacher-only: the Student continues to receive only the released full image.
@@ -60,11 +62,28 @@ def _extract_option_labels(question: str) -> tuple[str, ...]:
 
 
 def _build_direct_record(
-    item: dict[str, Any], source_dir: Path, source_line: int
+    item: dict[str, Any], source_dir: Path, source_line: int,
+    *, student_image_mode: str = "images", separate_teacher_views: bool = False,
+    teacher_full_image_mode: str = "images",
+    image_max_side: int | None = None, source_name: str = "pa_opd_direct_rs_opd",
 ) -> dict[str, Any]:
     """Create the no-thinking RS_OPD record without structural tags."""
 
-    image_path = source_dir / item["images"][0]
+    if student_image_mode not in {"images", "bbox_images", "native_bbox"}:
+        raise ValueError(f"Unsupported Student image mode: {student_image_mode}")
+    if teacher_full_image_mode not in {"images", "bbox_images", "native_bbox"}:
+        raise ValueError(f"Unsupported Teacher full image mode: {teacher_full_image_mode}")
+    full_image_path = source_dir / item["images"][0]
+    image_path = full_image_path
+    if "bbox_images" in (student_image_mode, teacher_full_image_mode):
+        relative = Path(item["images"][0])
+        if relative.is_absolute() or relative.parts[0] != "images" or ".." in relative.parts:
+            raise ValueError(f"bbox mode requires an images/ relative path, got {relative}")
+        boxed_image_path = source_dir / "bbox_images" / Path(*relative.parts[1:])
+        if student_image_mode == "bbox_images":
+            image_path = boxed_image_path
+        if teacher_full_image_mode == "bbox_images":
+            full_image_path = boxed_image_path
     crop_path = source_dir / item["teacher_images"][0]
     if not image_path.is_file():
         raise FileNotFoundError(f"Original image referenced by record is missing: {image_path}")
@@ -72,16 +91,28 @@ def _build_direct_record(
         raise FileNotFoundError(f"Evidence crop referenced by record is missing: {crop_path}")
 
     question = _clean_question(item.get("problem", ""))
+    student_question = question
+    if student_image_mode in {"bbox_images", "native_bbox"}:
+        # Preserve the annotation's target-box hint, including its position.
+        # Whole-scene annotations without a box hint remain whole-scene questions.
+        student_question = item.get("problem", "").replace("<image>", "").strip()
     option_labels = _extract_option_labels(question)
     answer = canonicalize_option_set(item.get("answer", ""), option_labels)
-    student_images = [{"path": str(image_path)}]
+    if image_max_side is not None and (isinstance(image_max_side, bool) or not isinstance(image_max_side, int) or image_max_side <= 0):
+        raise ValueError("image_max_side must be a positive integer or None")
+    def image_record(path):
+        record = {"path": str(path)}
+        if image_max_side is not None:
+            record["pa_opd_max_side"] = image_max_side
+        return record
+    student_images = [image_record(image_path)]
     image_prefix = "<image>\n"
-    return {
-        "data_source": "pa_opd_direct_rs_opd",
+    record = {
+        "data_source": source_name,
         "pa_opd_source_line": int(source_line),
-        "prompt": [{"role": "user", "content": f"{image_prefix}{question}{_DIRECT_OPTION_INSTRUCTION}"}],
+        "prompt": [{"role": "user", "content": f"{image_prefix}{student_question}{_DIRECT_OPTION_INSTRUCTION}"}],
         "images": student_images,
-        "bbox_images": [{"path": str(crop_path)}],
+        "bbox_images": [image_record(crop_path)],
         "ability": "visual_question_answering",
         "reward_model": {"style": "none", "ground_truth": answer},
         "extra_info": {
@@ -89,25 +120,48 @@ def _build_direct_record(
             "question": question,
             "option_labels": list(option_labels),
             "source_extra_info": item.get("extra_info", {}),
+            "source_line": int(source_line),
+            "source_name": source_name,
+            "source_jsonl": str(source_dir / "train.jsonl"),
+            "image_max_side": image_max_side,
+            "student_image_mode": student_image_mode,
+            "teacher_full_image_mode": teacher_full_image_mode,
+            "student_image_path": str(image_path),
+            "full_image_path": str(full_image_path),
+            "crop_image_path": str(crop_path),
+            "student_red_box_hint": _REMOVE_HINT in student_question,
         },
     }
+    if separate_teacher_views:
+        if not full_image_path.is_file():
+            raise FileNotFoundError(f"Teacher full image is missing: {full_image_path}")
+        record["teacher_images"] = [image_record(full_image_path), image_record(crop_path)]
+        teacher_question = (item.get("problem", "").replace("<image>", "").strip()
+                            if teacher_full_image_mode in {"bbox_images", "native_bbox"} else question)
+        record["teacher_prompt"] = [{"role": "user", "content": (
+            "Original full image:\n<image>\n"
+            "Additional high-resolution visual detail (do not reference this view in the response):\n<image>\n"
+            "Use the visual evidence in both images to answer the question and follow the supplied answer protocol.\n"
+            f"{teacher_question}{_DIRECT_OPTION_INSTRUCTION}"
+        )}]
+    return record
 
 
-def load_pa_opd_direct_jsonl(jsonl_path: str | Path) -> datasets.Dataset:
-    """Load RS_OPD as direct option-set PA-OPDVR records in memory."""
+def load_pa_opd_direct_jsonl(jsonl_path: str | Path, **view_options) -> datasets.Dataset:
+    """Load RS_OPD as direct option-set RS-OPSD records in memory."""
 
     path = Path(jsonl_path).resolve()
     if path.name != "train.jsonl":
-        raise ValueError(f"Direct PA-OPDVR expects an RS_OPD train.jsonl, got: {path}")
+        raise ValueError(f"Direct RS-OPSD expects an RS_OPD train.jsonl, got: {path}")
     records: list[dict[str, Any]] = []
     with path.open(encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
             try:
-                records.append(_build_direct_record(json.loads(line), path.parent, source_line=line_number))
+                records.append(_build_direct_record(json.loads(line), path.parent, source_line=line_number, **view_options))
             except Exception as exc:
-                raise RuntimeError(f"Failed to load direct PA-OPDVR record at {path}:{line_number}") from exc
+                raise RuntimeError(f"Failed to load direct RS-OPSD record at {path}:{line_number}") from exc
     if not records:
-        raise ValueError(f"Direct PA-OPDVR source JSONL is empty: {path}")
+        raise ValueError(f"Direct RS-OPSD source JSONL is empty: {path}")
     return datasets.Dataset.from_list(records)
 
 
@@ -149,13 +203,13 @@ def _strict_single_image_path(
 
 
 def _build_three_image_teacher_prompt(problem: str) -> str:
-    """Render the evaluator's ordered three-view prompt for a Teacher template."""
+    """Render CPVP's ordered three-view prompt for the Teacher."""
 
     hint = _TRIPLE_LOCAL_HINT if _REMOVE_HINT in problem else _TRIPLE_GLOBAL_HINT
     return f"{hint}\n\n{_clean_question(problem)}{_DIRECT_OPTION_INSTRUCTION}"
 
 
-def load_pa_opd_direct_three_image_jsonl(jsonl_path: str | Path) -> datasets.Dataset:
+def load_pa_opd_direct_three_image_jsonl(jsonl_path: str | Path, **view_options) -> datasets.Dataset:
     """Load direct RS_OPD records with full/derived/tight Teacher privilege.
 
     The base dataset owns the released full image and original tight crop. Its
@@ -166,7 +220,7 @@ def load_pa_opd_direct_three_image_jsonl(jsonl_path: str | Path) -> datasets.Dat
 
     path = Path(jsonl_path).resolve()
     if path.name != "train.jsonl":
-        raise ValueError(f"Three-image direct PA-OPDVR expects an RS_OPD train.jsonl, got: {path}")
+        raise ValueError(f"Three-image direct RS-OPSD expects an RS_OPD train.jsonl, got: {path}")
     derived_path = path.parent / "derived" / "train.jsonl"
     base_records = _read_strict_jsonl_records(path, description="base RS_OPD")
     derived_records = _read_strict_jsonl_records(derived_path, description="derived RS_OPD")
@@ -187,7 +241,7 @@ def load_pa_opd_direct_three_image_jsonl(jsonl_path: str | Path) -> datasets.Dat
             )
 
         try:
-            record = _build_direct_record(base, path.parent, source_line=base_line)
+            record = _build_direct_record(base, path.parent, source_line=base_line, **view_options)
             derived_crop_path = _strict_single_image_path(
                 derived,
                 derived_path.parent,
@@ -197,10 +251,12 @@ def load_pa_opd_direct_three_image_jsonl(jsonl_path: str | Path) -> datasets.Dat
             )
         except Exception as exc:
             raise RuntimeError(
-                f"Failed to load three-image direct PA-OPDVR record at {path}:{base_line}"
+                f"Failed to load three-image direct RS-OPSD record at {path}:{base_line}"
             ) from exc
 
-        full_image = record["images"][0]
+        full_image = {"path": record["extra_info"]["full_image_path"]}
+        if not Path(full_image["path"]).is_file():
+            raise FileNotFoundError(f"Teacher full image is missing: {full_image['path']}")
         tight_crop = record["bbox_images"][0]
         record["teacher_images"] = [full_image, {"path": str(derived_crop_path)}, tight_crop]
         record["teacher_prompt"] = [

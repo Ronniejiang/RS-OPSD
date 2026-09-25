@@ -35,7 +35,7 @@ from verl.utils.import_utils import load_extern_object
 
 
 def _install_pa_opd_direct_hooks_in_task_runner(config) -> bool:
-    """Install the static direct-answer PA-OPDVR protocol in TaskRunner."""
+    """Install the static direct-answer RS-OPSD protocol in TaskRunner."""
 
     if not config.get("pa_opd_direct", False):
         return False
@@ -43,7 +43,7 @@ def _install_pa_opd_direct_hooks_in_task_runner(config) -> bool:
     from verl.trainer.main_pa_opd_direct import _install_direct_hooks
 
     _install_direct_hooks()
-    print("[PA-OPD direct] installed reward-free direct OPDVR hooks in remote TaskRunner")
+    print("[PA-OPD direct] installed reward-free direct CAD hooks in remote TaskRunner")
     return True
 
 
@@ -245,7 +245,10 @@ class TaskRunner:
 
         from verl.trainer.ppo.ray_trainer import ResourcePoolManager
 
-        resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=self.mapping)
+        resource_pool_manager = ResourcePoolManager(
+            resource_pool_spec=resource_pool_spec, mapping=self.mapping,
+            max_colocate_count=int(config.trainer.get("ray_max_colocate_count", 3)),
+        )
         return resource_pool_manager
 
     def add_reward_model_worker(self, config):

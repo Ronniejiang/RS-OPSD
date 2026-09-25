@@ -89,9 +89,13 @@ def _init_empty_weights_compat():
         nn.Module.register_parameter = old_register_parameter
 
 
-def get_init_weight_context_manager(use_meta_tensor=True, mesh: DeviceMesh = None):
+def get_init_weight_context_manager(use_meta_tensor=True, mesh: DeviceMesh = None, sync_module_states=True):
     from accelerate import init_empty_weights
 
+    # Without a subsequent rank-0 broadcast, meta parameters on other ranks
+    # would be materialized as uninitialized storage and sharded as weights.
+    # In this mode every rank must actually load the checkpoint on CPU.
+    use_meta_tensor = use_meta_tensor and sync_module_states
     cpu_init_weights = lambda: torch.device("cpu")
     meta_init_weights = _init_empty_weights_compat if version.parse(torch.__version__) >= version.parse("2.10") else init_empty_weights
     if use_meta_tensor:

@@ -203,6 +203,7 @@ class vLLMAsyncRollout(BaseRollout):
         if not torch.distributed.is_initialized():
             initialize_global_process_group_ray()
         all_kwargs[0]["rank"] = int(os.environ["RANK"])
+        self._configure_local_compile_cache(rank=all_kwargs[0]["rank"])
         device_name = "NPU" if is_npu_available else "GPU"
         all_kwargs[0]["local_rank"] = (
             0
@@ -239,6 +240,28 @@ class vLLMAsyncRollout(BaseRollout):
 
         self.inference_engine = self._build_inference_engine()
         self.inference_engine.init_worker(all_kwargs)
+
+    @staticmethod
+    def _configure_local_compile_cache(*, rank: int) -> None:
+        """Give every rollout worker its own local vLLM compiler cache.
+
+        PPU jobs can create one vLLM instance per FSDP rank. A shared cache is
+        unsafe both on a network filesystem (stale file handles while dlopen
+        reads a just-written Triton extension) and when independent engines
+        use the same ``rank_0_0`` vLLM subdirectory. The launcher supplies the
+        node-local parent; PID additionally makes repeated workers collision
+        free within one rank.
+        """
+
+        parent = os.environ.get("PA_OPD_VLLM_CACHE_ROOT")
+        if not parent:
+            return
+        cache_root = os.path.join(parent, f"worker-rank-{rank}-pid-{os.getpid()}")
+        os.makedirs(cache_root, exist_ok=True)
+        os.environ["VLLM_CACHE_ROOT"] = cache_root
+        os.environ["TORCHINDUCTOR_CACHE_DIR"] = os.path.join(cache_root, "torchinductor")
+        os.environ["TRITON_CACHE_DIR"] = os.path.join(cache_root, "triton")
+        logger.warning("vLLM compile cache: %s", cache_root)
 
     def _load_model(self, *args, **kwargs):
         self.inference_engine.load_model(*args, **kwargs)

@@ -1,4 +1,4 @@
-# Original 2K direct PA-OPDVR with a frozen-reference KL regularizer ablation.
+# Original 2K direct RS-OPSD with a frozen-reference KL regularizer ablation.
 defaults:
   - ppo_trainer
   - user
@@ -24,11 +24,14 @@ actor_rollout_ref:
 
   actor:
     ppo_mini_batch_size: 32
+    # One global token denominator per optimizer mini-batch, across DP ranks
+    # and accumulated micro-batches; CAD/JSD/KL use their respective masks.
+    loss_agg_mode: token-mean
     use_dynamic_bsz: true
     ppo_max_token_len_per_gpu: 10240
     clip_ratio_low: 0.2
     clip_ratio_high: 0.3
-    # Native actor loss: OPDVR policy gradient + low-variance KL to frozen ref.
+    # Native actor loss: CAD policy gradient + low-variance KL to frozen ref.
     use_kl_loss: true
     kl_loss_coef: 0.001
     kl_loss_type: low_var_kl
@@ -39,6 +42,9 @@ actor_rollout_ref:
     fsdp_config:
       param_offload: true
       optimizer_offload: true
+      # Meta initialization requires rank-0 synchronization. If disabled,
+      # the worker must perform real CPU checkpoint loading on every rank.
+      sync_module_states: ${oc.decode:${oc.env:PA_OPD_FSDP_SYNC_MODULE_STATES,true}}
     policy_loss:
       loss_mode: vopd
     self_distillation:
@@ -69,6 +75,7 @@ actor_rollout_ref:
     log_prob_micro_batch_size_per_gpu: 1
     fsdp_config:
       param_offload: true
+      sync_module_states: ${oc.decode:${oc.env:PA_OPD_FSDP_SYNC_MODULE_STATES,true}}
 
   rollout:
     name: vllm
@@ -102,6 +109,10 @@ data:
   trust_remote_code: true
   return_multi_modal_inputs: true
   image_key: images
+  # View selection is explicit; it does not rewrite the source train.jsonl.
+  pa_opd_student_image_mode: images
+  pa_opd_teacher_full_image_mode: images
+  pa_opd_separate_teacher_views: false
   pa_opd_direct_jsonl: true
   train_batch_size: 32
   dataloader_num_workers: 8
@@ -114,7 +125,7 @@ pa_opd_direct: true
 
 algorithm:
   # Reward-free direct path skips reward advantages. With actor.use_kl_loss=true,
-  # actor loss is compute_opdvr_loss + 1e-3 * low_var_kl(current || frozen ref).
+  # actor loss is compute_cad_loss + 1e-3 * low_var_kl(current || frozen ref).
   adv_estimator: grpo
   norm_adv_by_std_in_grpo: false
   use_kl_in_reward: false
@@ -136,11 +147,14 @@ custom_reward_function:
 
 trainer:
   project_name: pa-opd
-  group_name: pa-opdvr-direct-2k-kl
-  experiment_name: ${oc.env:PA_OPD_RUN_NAME,pa-opdvr-direct-2k-kl1e-3-4gpu}
+  group_name: rs-opsd-direct-2k-kl
+  experiment_name: ${oc.env:PA_OPD_RUN_NAME,rs-opsd-direct-2k-kl1e-3-4gpu}
   logger: [console, wandb]
-  n_gpus_per_node: ${oc.env:PA_OPD_NUM_GPUS,4}
-  nnodes: 1
+  # ``oc.env`` returns strings. Decode each topology dimension separately:
+  # PA_OPD_NUM_GPUS is global world size, while Ray/FSDP need the local count
+  # and node count to construct a multi-node resource pool correctly.
+  n_gpus_per_node: ${oc.decode:${oc.env:PA_OPD_GPUS_PER_NODE,4}}
+  nnodes: ${oc.decode:${oc.env:PA_OPD_NNODES,1}}
   save_freq: 10
   skip_checkpoint: false
   test_freq: -1
@@ -152,5 +166,5 @@ trainer:
   resume_dataloader_state: true
   total_epochs: 1
   val_before_train: false
-  default_local_dir: ${oc.env:PA_OPD_WORK_DIR,outputs/pa-opdvr-direct-2k-kl1e-3-4gpu}/checkpoints
-  rollout_data_dir: ${oc.env:PA_OPD_WORK_DIR,outputs/pa-opdvr-direct-2k-kl1e-3-4gpu}/rollouts
+  default_local_dir: ${oc.env:PA_OPD_WORK_DIR,outputs/rs-opsd-direct-2k-kl1e-3-4gpu}/checkpoints
+  rollout_data_dir: ${oc.env:PA_OPD_WORK_DIR,outputs/rs-opsd-direct-2k-kl1e-3-4gpu}/rollouts

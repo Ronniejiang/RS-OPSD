@@ -143,11 +143,19 @@ class RLHFDataset(Dataset):
         self.seed = config.get("seed")
         # PA-OPD reads the supplied Vision-OPD-6K JSONL in memory. This keeps
         # source images in /dataset_rc and avoids materializing a workspace cache.
-        # PA-OPDVR intentionally exposes only the two direct JSONL protocols.
+        # RS-OPSD intentionally exposes only the two direct JSONL protocols.
         self.pa_opd_direct_jsonl = config.get("pa_opd_direct_jsonl", False)
         self.pa_opd_direct_three_image_jsonl = config.get("pa_opd_direct_three_image_jsonl", False)
+        self.pa_opd_view_options = {
+            "student_image_mode": config.get("pa_opd_student_image_mode", "images"),
+            "teacher_full_image_mode": config.get("pa_opd_teacher_full_image_mode", "images"),
+            "separate_teacher_views": config.get("pa_opd_separate_teacher_views", False),
+            "image_max_side": config.get("pa_opd_image_max_side", None),
+            "source_name": config.get("pa_opd_source_name", "pa_opd_direct_rs_opd"),
+        }
+        self.pa_opd_source_overrides = list(config.get("pa_opd_source_overrides", []))
         if self.pa_opd_direct_jsonl and self.pa_opd_direct_three_image_jsonl:
-            raise ValueError("Choose one PA-OPDVR JSONL loader mode")
+            raise ValueError("Choose one RS-OPSD JSONL loader mode")
         pa_opd_loader_count = int(self.pa_opd_direct_jsonl) + int(self.pa_opd_direct_three_image_jsonl)
 
         if pa_opd_loader_count == 0:
@@ -167,11 +175,15 @@ class RLHFDataset(Dataset):
             if self.pa_opd_direct_jsonl:
                 from verl.utils.dataset.pa_opd_dataset import load_pa_opd_direct_jsonl
 
-                dataframe = load_pa_opd_direct_jsonl(parquet_file)
+                view_options = dict(self.pa_opd_view_options)
+                for source in self.pa_opd_source_overrides:
+                    if os.path.realpath(source["path"]) == os.path.realpath(parquet_file):
+                        view_options.update({key: value for key, value in source.items() if key != "path"})
+                dataframe = load_pa_opd_direct_jsonl(parquet_file, **view_options)
             elif self.pa_opd_direct_three_image_jsonl:
                 from verl.utils.dataset.pa_opd_dataset import load_pa_opd_direct_three_image_jsonl
 
-                dataframe = load_pa_opd_direct_three_image_jsonl(parquet_file)
+                dataframe = load_pa_opd_direct_three_image_jsonl(parquet_file, **self.pa_opd_view_options)
 
             elif parquet_file.endswith(".parquet"):
                 dataframe = datasets.load_dataset("parquet", data_files=parquet_file)["train"]
@@ -464,6 +476,23 @@ class RLHFDataset(Dataset):
             for message in messages
             for content in message.get("content", [])
         )
+        has_image_cap = any(
+            isinstance(content, dict) and content.get("type") == "image"
+            and content.get("pa_opd_max_side") is not None
+            for message in messages for content in message.get("content", [])
+        )
+        if has_image_cap:
+            if has_opsd_bbox:
+                raise ValueError("Pre-rendered capped PA-OPD views cannot also request bbox drawing")
+            from verl.utils.dataset.pa_opd_image import load_capped_image
+            images = []
+            for message in messages:
+                for content in message.get("content", []):
+                    if isinstance(content, dict) and content.get("type") == "video":
+                        raise ValueError("Capped PA-OPD mode supports images only")
+                    if isinstance(content, dict) and content.get("type") == "image":
+                        images.append(load_capped_image(content))
+            return images, None
         if has_opsd_bbox:
             images = []
             for message in messages:

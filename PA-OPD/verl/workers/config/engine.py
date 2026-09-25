@@ -151,6 +151,9 @@ class FSDPEngineConfig(EngineConfig):
         forward_prefetch (bool): Whether to prefetch parameters for next forward pass, default False
         model_dtype (str): Model data type used to initialize the transformers model. default "fp32"
         use_orig_params (bool): Whether to use original parameters when initialize FSDP1, default False
+        sync_module_states (bool): Broadcast module state from rank 0 during
+            FSDP1 construction. Disable only when every rank independently
+            loads identical pretrained weights.
         seed (int): Random seed for reproducibility.
         full_determinism (bool): If true, enable_full_determinism is called to ensure reproducible results
             in distributed training. Important: this will negatively impact performance, so only use it for
@@ -170,6 +173,7 @@ class FSDPEngineConfig(EngineConfig):
     forward_prefetch: bool = False
     model_dtype: str = "fp32"
     use_orig_params: bool = False
+    sync_module_states: bool = True
     mixed_precision: Optional[dict[str, Any]] = None
     ulysses_sequence_parallel_size: int = 1
     entropy_from_logits_with_chunking: bool = False

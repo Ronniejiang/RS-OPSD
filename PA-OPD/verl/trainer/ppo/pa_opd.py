@@ -1,4 +1,4 @@
-"""Shared probability helpers for PA-OPDVR teacher reliability gating."""
+"""Shared probability helpers for CAD Teacher reliability gating."""
 
 from __future__ import annotations
 

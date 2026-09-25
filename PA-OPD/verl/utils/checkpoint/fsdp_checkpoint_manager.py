@@ -304,6 +304,14 @@ class FSDPCheckpointManager(BaseCheckpointManager):
 
             if self.rank == 0:
                 hf_local_path = os.path.join(local_path, "huggingface")
+                export_root = self.checkpoint_config.get("hf_model_dir") if self.checkpoint_config else None
+                if export_root:
+                    hf_local_path = os.path.join(export_root, f"global_step_{global_step}")
+                    # Include processor/tokenizer and any custom model code,
+                    # not just model.safetensors/config.json.
+                    import shutil
+
+                    shutil.copytree(hf_config_tokenizer_path, hf_local_path, dirs_exist_ok=True)
                 os.makedirs(hf_local_path, exist_ok=True)
 
                 if "ForTokenClassification" in model_config.architectures[0]:

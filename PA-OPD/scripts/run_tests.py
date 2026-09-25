@@ -1,4 +1,4 @@
-"""Run PA-OPDVR core tests without requiring pytest in the training environment."""
+"""Run RS-OPSD core tests without requiring pytest in the training environment."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ def main() -> int:
                 print(f"FAIL {path.name}::{name}: {exc}")
             else:
                 print(f"PASS {path.name}::{name}")
-    print(f"PA-OPDVR core tests: {total - len(failures)}/{total} passed")
+    print(f"RS-OPSD core tests: {total - len(failures)}/{total} passed")
     return int(bool(failures))
 
 

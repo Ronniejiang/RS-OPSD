@@ -24,6 +24,16 @@ from .config import NsightToolConfig
 from .profile import DistProfiler, ProfilerConfig
 
 
+# Integer RGB values are accepted by NVTX without its optional matplotlib
+# dependency. Resolve the extra colors used by verl rather than requiring a
+# plotting library merely to enter a training timer.
+_EXTRA_NVTX_COLORS = {"olive": 0x808000, "brown": 0xA52A2A, "pink": 0xFFC0CB}
+
+
+def _portable_nvtx_color(color):
+    return _EXTRA_NVTX_COLORS.get(color, color)
+
+
 def mark_start_range(
     message: Optional[str] = None,
     color: Optional[str] = None,
@@ -42,7 +52,7 @@ def mark_start_range(
         category (str, optional):
             The category of the range. Defaults to None.
     """
-    return nvtx.start_range(message=message, color=color, domain=domain, category=category)
+    return nvtx.start_range(message=message, color=_portable_nvtx_color(color), domain=domain, category=category)
 
 
 def mark_end_range(range_id: str) -> None:
@@ -76,7 +86,7 @@ def mark_annotate(
 
     def decorator(func):
         profile_message = message or func.__name__
-        return nvtx.annotate(profile_message, color=color, domain=domain, category=category)(func)
+        return nvtx.annotate(profile_message, color=_portable_nvtx_color(color), domain=domain, category=category)(func)
 
     return decorator
 

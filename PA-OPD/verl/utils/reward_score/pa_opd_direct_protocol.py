@@ -1,4 +1,4 @@
-"""Direct option-set protocol used by reward-free RS-OPD OPDVR.
+"""Direct option-set protocol used by reward-free RS-OPSD CAD.
 
 Unlike the adaptive PA-OPD recipe, this protocol does not create or validate
 ``<think>``/``<answer>`` tags.  A completion is useful only when it consists
