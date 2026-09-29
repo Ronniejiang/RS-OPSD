@@ -21,19 +21,19 @@
 </p>
 
 Average scores across **XLRS-Bench**, **MME-RealWorld-RS**, and **LRS-VQA**.
-<img src="figures/rs_opsd_name.svg" height="20" alt="RS-OPSD" /> achieves the best results on all three benchmarks among the methods
+RS-OPSD achieves the best results on all three benchmarks among the methods
 compared in the paper, improving the average score over the strongest competing
 method, ZoomSearch, by **4.0 percentage points**.
 
 | Model | Inference model size | XLRS-Bench | MME-RealWorld-RS | LRS-VQA | Average | Latency (s/sample) |
 | --- | --- | --- | --- | --- | --- | --- |
 | Qwen3-VL-8B-Instruct | 8B | 50.5 | 41.9 | 30.1 | 40.8 | 1.75 |
-| <img src="figures/rs_opd_lite_name.svg" height="20" alt="RS-OPD-Lite" /> | 2B | 45.8 | 56.2 | 30.5 | 44.2 | **1.09** |
-| <img src="figures/rs_opsd_name.svg" height="20" alt="RS-OPSD" /> | 8B | **53.1** | **61.5** | **33.3** | **49.3** | 1.58 |
+| RS-OPD-Lite | 2B | 45.8 | 56.2 | 30.5 | 44.2 | **1.09** |
+| RS-OPSD | 8B | **53.1** | **61.5** | **33.3** | **49.3** | 1.58 |
 
 Latency is measured on a **single NVIDIA H100 with batch size 1**, averaged
 across the three benchmarks under the paper's evaluation protocol.
-<img src="figures/rs_opd_lite_name.svg" height="20" alt="RS-OPD-Lite" /> surpasses most evaluated 8B-scale models and achieves the lowest
+RS-OPD-Lite surpasses most evaluated 8B-scale models and achieves the lowest
 measured latency—**12.8% lower** than the second-fastest method.
 Neither variant requires additional visual search or external tool calls at
 inference time.
@@ -125,17 +125,17 @@ experiment logs, and other generated artifacts.
 
 | Path | Purpose |
 | --- | --- |
-| `rs-opsd/` | <img src="figures/rs_opsd_name.svg" height="20" alt="RS-OPSD" /> training implementation, configurations, unit tests, and runtime launchers. |
+| `rs-opsd/` | RS-OPSD training implementation, configurations, unit tests, and runtime launchers. |
 | `eval/` | OpenAI-compatible evaluator for LRS-VQA, MME-RealWorld Remote Sensing, and XLRS-Bench. |
 | `eval/scripts/` | Local evaluation and environment launchers. |
 
 
-## <img src="figures/rs_opsd_name.svg" height="28" alt="RS-OPSD" /> training
+## RS-OPSD training
 
 The main experiments train exclusively on GeoEvidence-6K with **one rollout
 per sample**, a **global batch size of 96**, **KL coefficient 0.001**, and
-**gradient-norm clipping threshold 5**. <img src="figures/rs_opsd_name.svg" height="20" alt="RS-OPSD" /> is trained for **150 steps**;
-<img src="figures/rs_opd_lite_name.svg" height="20" alt="RS-OPD-Lite" /> is trained for **120 steps**. These are the paper's reported settings;
+**gradient-norm clipping threshold 5**. RS-OPSD is trained for **150 steps**;
+RS-OPD-Lite is trained for **120 steps**. These are the paper's reported settings;
 select the appropriate model, teacher-update policy, and runtime configuration
 when reproducing either variant.
 
@@ -184,7 +184,7 @@ scheduler-specific submission scripts.
 
 ## License
 
-<img src="figures/rs_opsd_name.svg" height="20" alt="RS-OPSD" /> is distributed under the [Apache-2.0 license](rs-opsd/LICENSE).
+RS-OPSD is distributed under the [Apache-2.0 license](rs-opsd/LICENSE).
 
 ## Acknowledgements
 
