@@ -186,13 +186,11 @@ scheduler-specific submission scripts.
 
 <img src="figures/rs_opsd_name.svg" height="20" alt="RS-OPSD" /> is distributed under the [Apache-2.0 license](rs-opsd/LICENSE).
 
-## Citations and acknowledgements
+## Acknowledgements
 
-We acknowledge the benchmarks and prior work below. Please cite the relevant
-original papers when using their datasets or building on their methods.
-MME-RealWorld-RS refers to the remote-sensing subset of MME-RealWorld.
+We thank the teams behind the following works for their contributions and open resources:
 
-- **XLRS-Bench** — Fengxiang Wang et al. *XLRS-Bench: Could Your Multimodal LLMs Understand Extremely Large Ultra-High-Resolution Remote Sensing Imagery?* CVPR 2025. [Paper](https://arxiv.org/abs/2503.23771) · [Code and dataset](https://github.com/AI9Stars/XLRS-Bench).
-- **MME-RealWorld** — Yi-Fan Zhang et al. *MME-RealWorld: Could Your Multimodal LLM Challenge High-Resolution Real-World Scenarios that are Difficult for Humans?* ICLR 2025. [Paper](https://arxiv.org/abs/2408.13257) · [Project page](https://mme-realworld.github.io/).
-- **LRS-VQA** — Junwei Luo et al. *When Large Vision-Language Model Meets Large Remote Sensing Imagery: Coarse-to-Fine Text-Guided Token Pruning.* ICCV 2025. [Paper](https://arxiv.org/abs/2503.07588) · [Code and dataset](https://github.com/VisionXLab/LRS-VQA).
-- **Vision-OPD** — Qianhao Yuan et al. *Vision-OPD: Learning to See Fine Details for Multimodal LLMs via On-Policy Self-Distillation.* arXiv, 2026. [Paper](https://arxiv.org/abs/2605.18740).
+- **XLRS-Bench** — [Paper](https://arxiv.org/abs/2503.23771) · [Code and dataset](https://github.com/AI9Stars/XLRS-Bench)
+- **MME-RealWorld** — [Paper](https://arxiv.org/abs/2408.13257) · [Project page](https://mme-realworld.github.io/)
+- **LRS-VQA** — [Paper](https://arxiv.org/abs/2503.07588) · [Code and dataset](https://github.com/VisionXLab/LRS-VQA)
+- **Vision-OPD** — [Paper](https://arxiv.org/abs/2605.18740) · [Code](https://github.com/VisionOPD/Vision-OPD)
