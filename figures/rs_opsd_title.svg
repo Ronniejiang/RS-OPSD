@@ -2,7 +2,7 @@
   <title id="title">RS-OPSD: Reliable Privileged On-Policy Self-Distillation for Ultra-High-Resolution Remote Sensing VQA</title>
   <desc id="desc">The RS-OPSD name and the acronym letters in the full title are highlighted in army green, #6F7A3A.</desc>
   <style>
-    text { font-family: Arial, Helvetica, sans-serif; font-weight: 600; fill: #24292f; }
+    text { font-family: "Comic Sans MS", "Comic Sans", "Comic Neue", cursive; font-weight: 600; fill: #24292f; }
     .accent { fill: #6F7A3A; }
     @media (prefers-color-scheme: dark) { text { fill: #e6edf3; } .accent { fill: #6F7A3A; } }
   </style>
