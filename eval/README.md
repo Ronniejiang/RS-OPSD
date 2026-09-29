@@ -131,8 +131,8 @@ top level of `eval/`. Canonical runnable helpers are in `eval/scripts/`:
 - `run_local_transformers.sh`: directly run a local Hugging Face VLM when a
   compatible vLLM is unavailable.
 - `create_vllm_env.sh`: optionally create a reproducible vLLM environment.
-- `probe_ppu_vllm_runtime.sh`: verify that a PPU image has a usable PPU2
-  runtime, vLLM, and native Qwen3-VL implementation.
+- `probe_vllm_runtime.sh`: verify visible CUDA-compatible devices, vLLM,
+  and its native Qwen3-VL implementation without vendor package requirements.
 - Scheduler-specific submission scripts and historical result snapshots are
   local-only and are not distributed with the public evaluator.
 - `merge_fsdp_checkpoint_to_hf.sh`: merge a `verl` FSDP actor checkpoint.
@@ -165,9 +165,9 @@ PYTHON=/path/to/python \
 bash eval/scripts/merge_fsdp_checkpoint_to_hf.sh /path/to/global_step_N
 ```
 
-### PPU evaluation
+### Runtime preflight
 
-Inside an allocated PPU runtime, use `probe_ppu_vllm_runtime.sh` to verify
+Inside an allocated GPU runtime, use `probe_vllm_runtime.sh` to verify
 the installed stack, then run `run_local_vllm.sh` with explicit paths as above.
 Scheduler configuration, image repositories and submission wrappers are local
 deployment details and are not included in this repository.

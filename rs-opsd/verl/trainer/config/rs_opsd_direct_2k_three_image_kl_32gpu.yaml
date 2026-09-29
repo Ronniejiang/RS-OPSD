@@ -1,4 +1,4 @@
-# Fresh 2-node x 16-PPU experiment, using the corrected global token mean.
+# Fresh 2-node x 16-GPU experiment, using the corrected global token mean.
 defaults:
   - rs_opsd_direct_2k_three_image_kl
   - _self_

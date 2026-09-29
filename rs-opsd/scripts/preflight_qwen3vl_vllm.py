@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Load Qwen3-VL through vLLM once on PPU and generate a tiny text response."""
+"""Load Qwen3-VL through vLLM once and generate a tiny text response."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def main() -> None:
         SamplingParams(temperature=0.0, max_tokens=8),
     )
     print("QWEN3_VL_VLLM_SMOKE_OUTPUT=" + result[0].outputs[0].text, flush=True)
-    print("Qwen3-VL vLLM PPU smoke test passed.", flush=True)
+    print("Qwen3-VL vLLM smoke test passed.", flush=True)
 
 
 if __name__ == "__main__":

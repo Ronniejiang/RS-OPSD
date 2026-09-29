@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only device summary; buffer nvidia-smi before Fuyao returns stdout."""
+"""Read-only device summary for runtimes providing the nvidia-smi interface."""
 import csv
 import json
 import subprocess

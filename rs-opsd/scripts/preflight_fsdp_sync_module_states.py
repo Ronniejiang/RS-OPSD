@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise PPU NCCL plus the FSDP constructor with a chosen sync mode."""
+"""Exercise NCCL plus the FSDP constructor with a chosen sync mode."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ def main() -> int:
         dist.all_gather(gathered, parameter_sum)
         if rank == 0:
             print(
-                "FSDP_PPU2_PREFLIGHT_OK "
+                "FSDP_PREFLIGHT_OK "
                 f"world_size={world_size} sync_module_states={sync_module_states} "
                 f"all_reduce_sum={probe.item():.1f} parameter_sums={[item.item() for item in gathered]}",
                 flush=True,

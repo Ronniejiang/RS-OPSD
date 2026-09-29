@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Read-only training preflight.  It runs in the same image and mounted volume
-# as the eight-PPU training command, but requests one device and never starts
-# Ray or the trainer.
+# Read-only training preflight in the selected runtime; never starts Ray or
+# the trainer. Devices must already be allocated by the caller.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PA_OPD_ROOT="${PA_OPD_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
@@ -26,5 +25,5 @@ echo "PA_OPD_ROOT=${PA_OPD_ROOT}"
 echo "PYTHON=$(command -v "${PYTHON}")"
 echo "MODEL_PATH=${MODEL_PATH}"
 echo "DATA_ROOT=${DATA_ROOT}"
-"${PYTHON}" "${SCRIPT_DIR}/preflight_ppu_runtime.py" --require-devices "${REQUIRE_DEVICES}"
-echo "PPU training preflight passed."
+"${PYTHON}" "${SCRIPT_DIR}/preflight_runtime.py" --require-devices "${REQUIRE_DEVICES}"
+echo "Training preflight passed."

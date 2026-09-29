@@ -130,27 +130,23 @@ bash scripts/train.sh direct-2k-kl
 
 ## Validate the installation
 
-Run the regression suite with `pytest` and a locally available Qwen tokenizer:
+Check the runtime dependencies and visible devices before training:
 
 ```bash
-PA_OPD_MODEL_PATH=/path/to/Qwen3-VL-8B-Instruct PYTHONPATH=. \
-python -m pytest tests/test_pa_opd_direct.py tests/test_pa_opd_direct_kl.py \
-  tests/test_pa_opd_topk_jsd.py tests/test_pa_opd_three_image.py \
-  tests/test_pa_opd_global_token_mean.py tests/test_ppu32_recipe.py \
-  tests/test_resume_checkpoint.py
+python scripts/preflight_runtime.py --require-devices 4
 ```
 
-It covers the direct option protocol, frozen-reference KL configuration,
-GT-safe top-k JSD, three-image loader, and checkpoint validator.
+Set `--require-devices` to the number of devices allocated on the local node.
+This preflight is not an end-to-end training test.
 
 For breaking interface changes, metric names and the intermediate-EOS probe
 fix, see [the terminology migration notes](docs/rs_opsd_cad_migration.md).
 
 PA-OPD loss reduction now uses optimizer-step global token means across DP
-ranks and micro-batches. See [the reduction specification and gradient tests](docs/global_token_mean.md)
-for the separate CAD/JSD/KL denominators and CPU/FSDP verification command.
+ranks and micro-batches. See [the reduction specification](docs/global_token_mean.md)
+for the separate CAD/JSD/KL denominators and prior validation coverage.
 
-## Portable PPU training
+## Portable GPU training
 
 Private scheduler submission scripts, container-build wrappers, experiment logs,
 and local environments are intentionally excluded from the public repository.
@@ -164,7 +160,7 @@ OUTPUT_DIR=/path/to/output \
 PA_OPD_GPUS_PER_NODE=16 PA_OPD_NNODES=1 \
 PA_OPD_STUDENT_IMAGE_MODE=bbox_images PA_OPD_TEACHER_FULL_IMAGE_MODE=bbox_images \
 PA_OPD_MEMORY_PROFILE=low PA_OPD_ROLLOUT_TP=2 \
-bash scripts/train_geoevidence_direct_2k_kl_ppu8.sh
+bash scripts/train_geoevidence.sh
 ```
 
 For the 32-device, batch-96, three-epoch three-view recipe, run the same
@@ -186,9 +182,24 @@ offload, and `gpu_memory_utilization=0.66`. Student visual profiling is bounded
 to one image / 2048² pixels; Teacher's two-image processing remains unchanged.
 These memory settings are a launch profile, not a guarantee against OOM.
 
+The public training stack uses PyTorch's CUDA device API, NCCL-compatible
+collectives, and vLLM. Install versions compatible with your accelerator and
+driver; this is not a promise of CPU or arbitrary accelerator support.
+`PA_OPD_GPUS_PER_NODE` accepts any positive count, with rollout TP dividing
+that count. Adjust recipe batch sizes and memory budgets for your topology.
+The 32-GPU recipe remains an explicit topology preset, not a requirement for
+all recipes. Run `scripts/preflight_geoevidence.sh` before starting training.
+
+No vendor-specific communication statistics are changed by default. If your
+runtime requires a documented workaround, explicitly set
+`RS_OPSD_COMM_STATS_ENV` to its `*_STATS_MODE` variable name and
+`RS_OPSD_COMM_STATS_MODE` to the required value; the default `inherit` leaves
+the environment untouched. The bounded `scripts/probe_collectives.py` tests
+torch/vLLM collectives using the currently configured runtime, without loading
+a hard-coded vendor library. Run it only with two allocated, idle devices.
+
 Each hybrid training rank reserves **one whole Ray GPU** through
-`trainer.ray_max_colocate_count=1`. On the vendor Ray 2.31 runtime, the previous
-1/3-GPU reservation placed 16 training ranks on only 6 devices. A loading-time
+`trainer.ray_max_colocate_count=1` to prevent unintended rank colocation. A loading-time
 assignment check now rejects repeated devices before model weights are loaded.
 The optional TP preflight tests collectives without model weights, then exits
 and releases its Ray actors before training starts.
@@ -199,11 +210,10 @@ synchronization is explicitly disabled, every rank now loads real CPU weights
 instead. Disabling the broadcast while retaining empty meta parameters can
 produce uniform logits and zero gradients without a startup exception.
 NVTX profiling also maps extended color names to RGB integers, avoiding an
-optional matplotlib dependency in the PPU image.
+optional matplotlib dependency in the runtime environment.
 
-When monitoring, require both `16 unique training devices` and a completed
-training step with sensible outputs and finite, nonzero gradients; a Fuyao
-`JOB_RUNNING` status may still mean hardware patrol.
-Use `fuyao log --tail=100 --no-interactive` with the returned job name/site.
-For a read-only buffered device/process memory snapshot inside the job, run
-`python3 scripts/inspect_ppu_job_devices.py` (or its shared workspace path).
+When monitoring, require the requested number of unique training devices and
+a completed training step with sensible outputs and finite gradients; a
+scheduler's running status alone does not prove that training has started.
+For a read-only device/process memory snapshot on systems providing
+`nvidia-smi`, run `python3 scripts/inspect_job_devices.py`.

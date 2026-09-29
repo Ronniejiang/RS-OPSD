@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded TP checks: two-PPU generation or configurable single-node Ray groups."""
+"""Bounded TP checks: two-GPU generation or configurable single-node Ray groups."""
 
 import argparse
 import datetime
@@ -120,7 +120,7 @@ def ray_probe():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--phase", choices=["collective", "model", "ray"],
-                        default=os.environ.get("PPU_TP_PROBE_PHASE"))
+                        default=os.environ.get("RS_OPSD_TP_PROBE_PHASE"))
     args = parser.parse_args()
     if args.phase == "collective":
         collective_probe()
@@ -149,7 +149,7 @@ def main():
             print(f"START_MODEL disable_pynccl={disable}", flush=True)
             subprocess.run([sys.executable, str(Path(__file__).resolve()), "--phase", "model"],
                            env=env, timeout=360, check=True)
-            print(f"PPU_TP_PREFLIGHT_PASSED disable_pynccl={disable}", flush=True)
+            print(f"TP_PREFLIGHT_PASSED disable_pynccl={disable}", flush=True)
             return
     raise RuntimeError("Both native PyNCCL and fallback collective probes failed")
 

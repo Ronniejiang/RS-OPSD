@@ -42,23 +42,16 @@ This path supports the current FSDP/SP=1 recipes. Ulysses SP>1 explicitly fails
 instead of assuming its replication/reduction semantics. Non-PA-OPD policies
 and explicitly selected non-token-mean reductions retain their existing path.
 
-## Verification
+## Prior validation
 
-Run from `rs-opsd/`:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. OMP_NUM_THREADS=1 \
-  python3 -m pytest -q -p no:cacheprovider tests/test_pa_opd_global_token_mean.py
-```
-
-Tests compare the actual loss kernels and gradients with full-batch reference
+The development tests (not included in this release) compared the actual loss kernels and gradients with full-batch reference
 calculations for unequal lengths, empty masks, Teacher presence/reliability,
 simulated 1/2/16 ranks and varying micro-batch partitions. The real actor
-update loop is tested with tiny CPU model-forward doubles, both dynamic and
+update loop was tested with tiny CPU model-forward doubles, both dynamic and
 fixed batches, with and without JSD. A separate real two-process CPU/Gloo FSDP
-test checks reduced accumulated gradients, all-empty and empty-rank cases,
+test checked reduced accumulated gradients, all-empty and empty-rank cases,
 loss values, preclip norms and clipped gradients. This is not a full-model
-16-PPU end-to-end test.
+16-device end-to-end test.
 
 Existing checkpoints remain loadable: no model/optimizer state layout or
 runtime sidecar was changed. However, resuming with this code deliberately

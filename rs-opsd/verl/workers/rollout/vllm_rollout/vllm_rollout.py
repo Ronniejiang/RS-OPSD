@@ -245,7 +245,7 @@ class vLLMAsyncRollout(BaseRollout):
     def _configure_local_compile_cache(*, rank: int) -> None:
         """Give every rollout worker its own local vLLM compiler cache.
 
-        PPU jobs can create one vLLM instance per FSDP rank. A shared cache is
+        Hybrid jobs can create one vLLM instance per FSDP rank. A shared cache is
         unsafe both on a network filesystem (stale file handles while dlopen
         reads a just-written Triton extension) and when independent engines
         use the same ``rank_0_0`` vLLM subdirectory. The launcher supplies the

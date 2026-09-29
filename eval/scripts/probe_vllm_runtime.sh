@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Read-only runtime probe for a Fuyao PPU image. It intentionally does not
-# load a model or access benchmark data. A successful exit proves that the
-# image can initialize PPU CUDA compatibility and carries a native Qwen3-VL
-# vLLM implementation.
+# Runtime probe without loading a model or accessing benchmark data.
+# Checks CUDA-compatible devices and the native Qwen3-VL vLLM implementation.
 
 PYTHON="${PYTHON:-python3}"
 command -v "${PYTHON}" >/dev/null 2>&1 || {
@@ -32,14 +30,14 @@ def package_version(name: str) -> str | None:
 
 packages = {
     name: package_version(name)
-    for name in ("torch", "vllm", "transformers", "acext", "flashinfer-python")
+    for name in ("torch", "vllm", "transformers", "flashinfer-python")
 }
 report: dict[str, object] = {
     "python": sys.executable,
     "packages": packages,
     "environment": {
         key: os.environ.get(key)
-        for key in ("SAIL_PYPI_SDK_VESION", "CUDA_SDK_VER")
+        for key in ("CUDA_VISIBLE_DEVICES", "CUDA_HOME")
         if os.environ.get(key) is not None
     },
 }
@@ -54,7 +52,7 @@ try:
         "torch_cuda": torch.version.cuda,
     }
     if not cuda["available"] or not cuda["device_count"]:
-        failures.append("torch.cuda reports no visible PPU device")
+        failures.append("torch.cuda reports no visible GPU")
     else:
         try:
             cuda["device_0"] = torch.cuda.get_device_name(0)
@@ -63,7 +61,7 @@ try:
             cuda["kernel_probe"] = float(tensor.item())
         except Exception as error:
             cuda["initialization_error"] = f"{type(error).__name__}: {error}"
-            failures.append("PPU CUDA initialization failed")
+            failures.append("CUDA initialization failed")
     report["cuda"] = cuda
 except Exception as error:
     report["cuda"] = {"initialization_error": f"{type(error).__name__}: {error}"}
@@ -78,15 +76,6 @@ else:
             failures.append(f"vLLM {vllm_version} is older than 0.18.0")
     except Exception:
         failures.append(f"could not parse vLLM version: {vllm_version}")
-
-ppu2_packages = [
-    f"{name}=={version}"
-    for name, version in packages.items()
-    if version is not None and "ppu2" in version.lower()
-]
-report["ppu2_packages"] = ppu2_packages
-if not ppu2_packages:
-    failures.append("no installed runtime package identifies as PPU 2.x")
 
 try:
     qwen3_module = importlib.import_module("vllm.model_executor.models.qwen3_vl")

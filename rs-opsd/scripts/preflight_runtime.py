@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the PPU CUDA-compatibility runtime before RS-OPSD training."""
+"""Validate the CUDA-compatible runtime before RS-OPSD training."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 
 # The script is also meant to be runnable directly by a user before submit;
 # add the local PA-OPD source tree instead of requiring a globally installed
-# ``verl`` package in the PPU SDK image.
+# ``verl`` package in the selected environment.
 PA_OPD_ROOT = Path(__file__).resolve().parents[1]
 if str(PA_OPD_ROOT) not in sys.path:
     sys.path.insert(0, str(PA_OPD_ROOT))
@@ -21,6 +21,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--require-devices", type=int, default=0)
     args = parser.parse_args()
+    if args.require_devices < 0:
+        parser.error("--require-devices must be non-negative")
 
     import torch
 
@@ -56,12 +58,11 @@ def main() -> int:
     if args.require_devices:
         if not torch.cuda.is_available():
             raise RuntimeError(
-                "No CUDA-compatible PPU device is visible. Run this only inside the requested PPU job; "
-                "the PPU SDK intentionally exposes devices through torch.cuda."
+                "No CUDA-compatible GPU is visible. Check device allocation and the installed runtime."
             )
         if torch.cuda.device_count() != args.require_devices:
             raise RuntimeError(
-                f"Expected exactly {args.require_devices} visible PPU devices, got {torch.cuda.device_count()}"
+                f"Expected exactly {args.require_devices} visible GPUs, got {torch.cuda.device_count()}"
             )
         for index in range(args.require_devices):
             print(f"device[{index}]={torch.cuda.get_device_name(index)}")

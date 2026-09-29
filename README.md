@@ -153,6 +153,14 @@ Install dependencies appropriate for your accelerator platform, then run:
     PYTHON=.venv/bin/python PA_OPD_NUM_GPUS=4 \
     bash scripts/train.sh direct-2k-three-image-kl
 
+The runtime uses PyTorch's CUDA device API, NCCL-compatible collectives, and
+vLLM; use builds matched to your accelerator and driver. There is no required
+vendor-specific package label. For data/runtime checks before launch, use
+`rs-opsd/scripts/preflight_geoevidence.sh`; the configurable GPU launcher is
+`rs-opsd/scripts/train_geoevidence.sh`. See the training guide for topology and
+memory settings. Evaluation runtime checks are in
+`eval/scripts/probe_vllm_runtime.sh`.
+
 `DATA_ROOT` must contain `train.jsonl`, `images/`, and `teacher_images/`;
 the three-view recipe additionally needs `derived/train.jsonl` and
 `derived/teacher_images/`. Set `OUTPUT_DIR` explicitly for generated artifacts.

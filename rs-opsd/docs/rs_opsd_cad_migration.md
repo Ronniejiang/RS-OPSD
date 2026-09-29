@@ -73,5 +73,5 @@ modified by this migration.
 - All six renamed YAML configurations retain their non-naming values.
 - Shell syntax checks and `git diff --check` passed.
 
-These are CPU/configuration checks, not a full PPU training run. No training
+These are CPU/configuration checks, not a full accelerator training run. No training
 jobs were submitted or restarted for this migration.

@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""Bounded two-device PCCL statistics A/B probe; no model or dataset loading."""
+"""Bounded two-device torch/vLLM collective stress test; no model or dataset loading."""
 import argparse
-import ctypes
 import datetime
 import json
 import os
@@ -25,14 +24,8 @@ def worker(iterations):
     comm = PyNcclCommunicator(cpu_group, device=device)
     if comm.disabled:
         raise RuntimeError('PyNcclCommunicator is disabled; test would not exercise the failing path')
-    lib = ctypes.CDLL('/opt/accl-p/libpccl.so.2.1.0')
-    flags = {name: ctype.in_dll(lib, name).value for name, ctype in (
-        ('nccl_c4_stats_enable', ctypes.c_bool),
-        ('nccl_c4_stats_mode', ctypes.c_int),
-        ('nccl_coll_stats_enable', ctypes.c_bool),
-    )}
     print('PROBE_INIT ' + json.dumps(dict(rank=rank, torch=torch.__version__,
-          stats_env=os.environ.get('ACCL_C4_STATS_MODE'), flags=flags)), flush=True)
+          device=torch.cuda.get_device_name(device))), flush=True)
     x = torch.full((256,), rank + 1., device='cuda')
     gathered = torch.empty(512, device='cuda')
     output = torch.empty_like(x)
@@ -71,14 +64,12 @@ def main():
         worker(args.iterations)
         return
     results = {}
-    for mode in ('CONN', 'none'):
-        env = dict(os.environ, ACCL_C4_STATS_MODE=mode, NCCL_DEBUG='WARN',
-                   NCCL_DEBUG_SUBSYS='ALL', NCCL_CUMEM_ENABLE='0',
-                   PYTHONUNBUFFERED='1', OMP_NUM_THREADS='1')
+    for mode in ('current_environment',):
+        env = dict(os.environ, PYTHONUNBUFFERED='1')
+        env.setdefault('NCCL_DEBUG', 'WARN')
+        env.setdefault('OMP_NUM_THREADS', '1')
         # Show underlying allocation errors in job stdout, not a hidden node log.
         env.pop('NCCL_DEBUG_FILE', None)
-        env.pop('ACCL_CALL_POOL_COUNT', None)
-        env.pop('ACCL_COLL_STATS_DISABLE', None)
         cmd = [sys.executable, '-m', 'torch.distributed.run', '--standalone',
                '--nproc_per_node=2', str(Path(__file__).resolve()), '--worker',
                '--iterations', str(args.iterations)]
@@ -97,7 +88,7 @@ def main():
             results[mode] = 'timeout'
         print(f'PROBE_CASE_END mode={mode} result={results[mode]}', flush=True)
     print('PROBE_SUMMARY ' + json.dumps(results), flush=True)
-    if results.get('none') != 0:
+    if results.get('current_environment') != 0:
         raise SystemExit(1)
 
 

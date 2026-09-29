@@ -1,29 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# PPU uses a CUDA/NCCL compatibility layer.  Do not replace CUDA_VISIBLE_DEVICES
-# or trainer.device=cuda with a hypothetical torch.ppu backend.
+# Runtime launcher for the CUDA/NCCL-compatible training stack.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PA_OPD_ROOT="${PA_OPD_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
-source "${SCRIPT_DIR}/ppu_comm_env.sh"
-# The submitted source is unpacked at /code in Fuyao.  Use the selected PPU
-# image's interpreter by default; a workstation-only virtualenv path is not
-# available inside that container.
+source "${SCRIPT_DIR}/comm_env.sh"
+# Use the active environment, or explicitly select a compatible interpreter.
 PYTHON="${PYTHON:-python3}"
 
 MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to a local Hugging Face model directory}"
 DATA_ROOT="${DATA_ROOT:?Set DATA_ROOT to the GeoEvidence dataset directory}"
-RUN_NAME="${RUN_NAME:-qwen3-vl-8b-instruct-gpu8-2k-kl-orig+crop}"
+RUN_NAME="${RUN_NAME:-rs-opsd-geoevidence-2k-kl}"
 TRAIN_RECIPE="${TRAIN_RECIPE:-direct-2k-kl}"
 if [[ -z "${OUTPUT_DIR:-}" ]]; then
   : "${CHECKPOINTS_ROOT:?Set OUTPUT_DIR or CHECKPOINTS_ROOT explicitly}"
   OUTPUT_DIR="${CHECKPOINTS_ROOT}/${RUN_NAME}"
 fi
 # PA_OPD_NUM_GPUS is the global FSDP/Ray world size. Keep it distinct from
-# PA_OPD_GPUS_PER_NODE: the latter is what the scheduled Fuyao node exposes
-# locally. The target PPU partition offers both 1x8 and 1x16 nodes.
+# PA_OPD_GPUS_PER_NODE: the latter is the number exposed locally on each node.
 PA_OPD_GPUS_PER_NODE="${PA_OPD_GPUS_PER_NODE:-8}"
 PA_OPD_NNODES="${PA_OPD_NNODES:-1}"
+for topology_key in PA_OPD_GPUS_PER_NODE PA_OPD_NNODES; do
+  [[ "${!topology_key}" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: ${topology_key} must be a positive integer" >&2; exit 2; }
+done
 PA_OPD_NUM_GPUS="${PA_OPD_NUM_GPUS:-$((PA_OPD_GPUS_PER_NODE * PA_OPD_NNODES))}"
 WANDB_MODE="${WANDB_MODE:-offline}"
 PA_OPD_ROLLOUT_TP="${PA_OPD_ROLLOUT_TP:-1}"
@@ -31,21 +30,16 @@ PA_OPD_STUDENT_IMAGE_MODE="${PA_OPD_STUDENT_IMAGE_MODE:-images}"
 PA_OPD_TEACHER_FULL_IMAGE_MODE="${PA_OPD_TEACHER_FULL_IMAGE_MODE:-images}"
 export PA_OPD_STUDENT_IMAGE_MODE PA_OPD_TEACHER_FULL_IMAGE_MODE
 [[ "${PA_OPD_ROLLOUT_TP}" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: PA_OPD_ROLLOUT_TP must be a positive integer" >&2; exit 2; }
-(( PA_OPD_GPUS_PER_NODE % PA_OPD_ROLLOUT_TP == 0 )) || { echo "ERROR: rollout TP must divide devices per node" >&2; exit 2; }
 export PYTHONUNBUFFERED=1
-echo "Starting PA-OPD PPU launcher: rollout TP=${PA_OPD_ROLLOUT_TP}, devices=${PA_OPD_NUM_GPUS}"
+echo "Starting RS-OPSD launcher: rollout TP=${PA_OPD_ROLLOUT_TP}, devices=${PA_OPD_NUM_GPUS}"
 
-[[ "${PA_OPD_GPUS_PER_NODE}" == "8" || "${PA_OPD_GPUS_PER_NODE}" == "16" ]] || {
-  echo "ERROR: this PPU recipe supports 8 or 16 devices per node, got ${PA_OPD_GPUS_PER_NODE}" >&2
-  exit 2
-}
-[[ "${PA_OPD_NNODES}" =~ ^[1-9][0-9]*$ ]] || { echo "ERROR: PA_OPD_NNODES must be a positive integer" >&2; exit 2; }
+(( PA_OPD_GPUS_PER_NODE % PA_OPD_ROLLOUT_TP == 0 )) || { echo "ERROR: rollout TP must divide devices per node" >&2; exit 2; }
 [[ "${PA_OPD_NUM_GPUS}" == "$((PA_OPD_GPUS_PER_NODE * PA_OPD_NNODES))" ]] || {
   echo "ERROR: PA_OPD_NUM_GPUS=${PA_OPD_NUM_GPUS} must equal PA_OPD_GPUS_PER_NODE * PA_OPD_NNODES (${PA_OPD_GPUS_PER_NODE} * ${PA_OPD_NNODES})" >&2
   exit 2
 }
 case "${TRAIN_RECIPE}" in
-  direct-2k-kl|direct-2k-kl-mixed|direct-2k-topk64-jsd-kl|direct-2k-three-image-kl-32gpu|direct-2k-three-image-topk64-jsd-kl) ;;
+  direct-2k-kl|direct-2k-kl-mixed|direct-2k-topk64-jsd-kl|direct-2k-three-image-kl|direct-2k-three-image-kl-32gpu|direct-2k-three-image-topk64-jsd-kl) ;;
   *)
     echo "ERROR: unsupported direct GeoEvidence recipe: ${TRAIN_RECIPE}" >&2
     exit 2
@@ -71,9 +65,8 @@ export NCCL_CUMEM_ENABLE="${NCCL_CUMEM_ENABLE:-0}"
 # explicitly selects real CPU checkpoint loading on every rank instead.
 export PA_OPD_FSDP_SYNC_MODULE_STATES="${PA_OPD_FSDP_SYNC_MODULE_STATES:-true}"
 export VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-WARN}"
-# A hybrid WorkerDict already contains Actor/Reference/Teacher/rollout. The
-# vendor Ray 2.31 runtime packed three 1/3-GPU WorkerDicts onto each device,
-# leaving 10 of 16 devices idle. Reserve a full GPU for each training rank.
+# A hybrid WorkerDict already contains Actor/Reference/Teacher/rollout.
+# Reserve a full GPU per training rank to avoid unintended colocation.
 export PA_OPD_VALIDATE_GPU_ASSIGNMENT=1
 # ``low`` combines activation offload, one concurrent rollout sequence and a
 # 2K visual profiling budget. Historical memory fractions measured with three
@@ -132,10 +125,10 @@ if [[ "${TRAIN_RECIPE}" == direct-2k-kl-mixed ]]; then
   "${PYTHON}" "${SCRIPT_DIR}/validate_mixed_2k_data.py" \
     --geoevidence-root "${DATA_ROOT}" --visionopd-root "${PA_OPD_VISIONOPD_ROOT}"
 fi
-"${PYTHON}" "${SCRIPT_DIR}/preflight_ppu_runtime.py" --require-devices "${PA_OPD_GPUS_PER_NODE}"
+"${PYTHON}" "${SCRIPT_DIR}/preflight_runtime.py" --require-devices "${PA_OPD_GPUS_PER_NODE}"
 if [[ "${PA_OPD_TP_PREFLIGHT:-0}" == "1" ]]; then
-  PA_OPD_NUM_GPUS="${PA_OPD_NUM_GPUS}" PA_OPD_ROLLOUT_TP="${PA_OPD_ROLLOUT_TP}" \
-    NCCL_DEBUG=INFO "${PYTHON}" "${SCRIPT_DIR}/preflight_vllm_tp_ppu.py" --phase ray
+  PA_OPD_NUM_GPUS="${PA_OPD_GPUS_PER_NODE}" PA_OPD_ROLLOUT_TP="${PA_OPD_ROLLOUT_TP}" \
+    NCCL_DEBUG=INFO "${PYTHON}" "${SCRIPT_DIR}/preflight_vllm_tp.py" --phase ray
 fi
 "${PYTHON}" - "${DATA_ROOT}" <<'PY'
 import json
@@ -164,14 +157,14 @@ PY
 mkdir -p "${OUTPUT_DIR}"
 # ``train.sh`` is deliberately a separate shell process.  Export every
 # recipe input, including defaults set above, so this entrypoint behaves the
-# same when launched directly and when launched through ``fuyao deploy env``.
+# same when launched directly and when launched through a scheduler.
 export MODEL_PATH DATA_ROOT RUN_NAME CHECKPOINTS_ROOT OUTPUT_DIR PA_OPD_NUM_GPUS PA_OPD_GPUS_PER_NODE PA_OPD_NNODES TRAIN_RECIPE
 export WANDB_MODE
 export PA_OPD_RUN_NAME="${RUN_NAME}"
 export PA_OPD_SHORT_TMP="${PA_OPD_SHORT_TMP:-/tmp/pao-${UID:-0}-${RANDOM}}"
 
-echo "PPU memory profile: ${PA_OPD_MEMORY_PROFILE}"
-echo "  topology: ${PA_OPD_NNODES} node(s) x ${PA_OPD_GPUS_PER_NODE} PPU = ${PA_OPD_NUM_GPUS} total devices"
+echo "Memory profile: ${PA_OPD_MEMORY_PROFILE}"
+echo "  topology: ${PA_OPD_NNODES} node(s) x ${PA_OPD_GPUS_PER_NODE} GPUs = ${PA_OPD_NUM_GPUS} total devices"
 echo "  vLLM: utilization=${PA_OPD_VLLM_GPU_MEMORY_UTILIZATION}, eager=${PA_OPD_VLLM_ENFORCE_EAGER}, max_num_seqs=${PA_OPD_VLLM_MAX_NUM_SEQS}, max_model_len=${PA_OPD_VLLM_MAX_MODEL_LEN}, max_batched_tokens=${PA_OPD_VLLM_MAX_NUM_BATCHED_TOKENS}"
 echo "  actor: max_tokens_per_gpu=${PA_OPD_PPO_MAX_TOKEN_LEN_PER_GPU}, activation_offload=${PA_OPD_ENABLE_ACTIVATION_OFFLOAD}; data.max_prompt_length=${PA_OPD_MAX_PROMPT_LENGTH}"
 exec bash "${SCRIPT_DIR}/train.sh" "${TRAIN_RECIPE}" \
