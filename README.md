@@ -125,7 +125,7 @@ experiment logs, and other generated artifacts.
 
 | Path | Purpose |
 | --- | --- |
-| `rs-opsd/` | RS-OPSD training implementation, configurations, unit tests, and runtime launchers. |
+| `rs-opsd/` | RS-OPSD training implementation, configurations, dependencies, and runtime launchers. |
 | `eval/` | OpenAI-compatible evaluator for LRS-VQA, MME-RealWorld Remote Sensing, and XLRS-Bench. |
 | `eval/scripts/` | Local evaluation and environment launchers. |
 
@@ -139,49 +139,231 @@ RS-OPD-Lite is trained for **120 steps**. These are the paper's reported setting
 select the appropriate model, teacher-update policy, and runtime configuration
 when reproducing either variant.
 
-Use a compatible PyTorch/vLLM environment, a local Qwen3-VL model, and the
-GeoEvidence dataset layout described in [the training guide](rs-opsd/README.md).
-Install dependencies appropriate for your accelerator platform, then run:
+The released training recipes use **2K images + CAD + reference KL** only:
+direct answers, one rollout per sample, and no reasoning tags or format reward.
+The two-view recipe is a visual-privilege ablation; the three-view recipe is
+the main method. Teacher weights can be EMA-updated or frozen; the reference
+model stays frozen and receives the Student's input.
 
-    cd rs-opsd
-    python3 -m venv .venv
-    .venv/bin/python -m pip install -r requirements.txt
+### Environment
 
-    MODEL_PATH=/path/to/Qwen3-VL-8B-Instruct \
-    DATA_ROOT=/path/to/GeoEvidence-6K \
-    OUTPUT_DIR=/path/to/output \
-    PYTHON=.venv/bin/python PA_OPD_NUM_GPUS=4 \
-    bash scripts/train.sh direct-2k-three-image-kl
+Run from the repository root, using Python 3.12 and a compatible accelerator:
 
-The runtime uses PyTorch's CUDA device API, NCCL-compatible collectives, and
-vLLM; use builds matched to your accelerator and driver. There is no required
-vendor-specific package label. For data/runtime checks before launch, use
-`rs-opsd/scripts/preflight_geoevidence.sh`; the configurable GPU launcher is
-`rs-opsd/scripts/train_geoevidence.sh`. See the training guide for topology and
-memory settings. Evaluation runtime checks are in
-`eval/scripts/probe_vllm_runtime.sh`.
+```bash
+cd rs-opsd
+python3.12 -m venv .venv
+.venv/bin/python -m pip install --use-pep517 -r requirements.txt
+.venv/bin/python -m pip install --no-deps -e .
+.venv/bin/python scripts/preflight_runtime.py --require-devices 4
+```
 
-`DATA_ROOT` must contain `train.jsonl`, `images/`, and `teacher_images/`;
-the three-view recipe additionally needs `derived/train.jsonl` and
-`derived/teacher_images/`. Set `OUTPUT_DIR` explicitly for generated artifacts.
-The directory is now `rs-opsd/`; internal `pa_opd_*` fields and `PA_OPD_*`
-environment variables retain their names for compatibility. Existing data and
-checkpoint paths are unchanged.
+`requirements-core.txt` lists application dependencies; `requirements-runtime.txt`
+pins the upstream PyTorch/vLLM/Ray stack; `requirements.txt` includes both.
+Upstream vLLM 0.18 uses Transformers 4.x (at least 4.57.3). The runtime uses
+PyTorch's CUDA API, NCCL-compatible collectives and vLLM; choose builds matched
+to your hardware and driver. SDPA with padding removal disabled is used for
+the actor, so FlashAttention is not an unconditional actor dependency.
+
+For a prebuilt accelerator environment, keep its compatible runtime. First
+check `python -m pip install --dry-run -r requirements-core.txt`, applying
+your platform's constraints with `-c` if needed. Install core dependencies only
+after checking transitive runtime changes, then register this fork using
+`python -m pip install --no-deps -e .` and run `python -m pip check`.
+The preflight checks dependencies/devices, not end-to-end training.
+
+### Data and image views
+
+Training loads existing 2K views; it does not generate images. The local
+training layout is:
+
+```text
+DATA_ROOT/
+  final_annotations.json
+  train.jsonl
+  images/                    # plain full images
+  bbox_images/               # boxed full images, when selected
+  teacher_images/            # tight evidence crops
+  derived/                   # required for three-view recipes
+    train.jsonl
+    teacher_images/          # contextual crops with evidence boxes
+```
+
+Each training JSONL row provides one `images` path, one `teacher_images` path,
+a multiple-choice `problem`, and an `answer`. Paths are relative to the dataset
+root. The derived manifest must be positionally aligned with the main manifest.
+Teacher view order is global, contextual (three-view only), then evidence.
+The Student and reference use only the selected global view.
+
+The public dataset calls these views `plain`, `global`, `contextual`, and
+`evidence`, respectively. Its standardized `metadata.jsonl` is **not** a
+drop-in replacement for the training manifest. Prepare the local layout and
+manifests before launching; do not pass release metadata as `train.jsonl`.
+For original annotation-based manifests, see
+`scripts/rebuild_geoevidence_train_jsonl.py --help` and
+`scripts/rebuild_geoevidence_derived_train_jsonl.py --help` (inside `rs-opsd/`).
+
+### Launch
+
+From `rs-opsd/`, after activating the training environment:
+
+```bash
+MODEL_PATH=/path/to/Qwen3-VL-8B-Instruct \
+DATA_ROOT=/path/to/GeoEvidence-6K \
+OUTPUT_DIR=/path/to/output \
+PYTHON=.venv/bin/python \
+TRAIN_RECIPE=direct-2k-three-image-kl \
+PA_OPD_GPUS_PER_NODE=4 PA_OPD_NNODES=1 \
+PA_OPD_STUDENT_IMAGE_MODE=bbox_images \
+PA_OPD_TEACHER_FULL_IMAGE_MODE=bbox_images \
+bash scripts/train_geoevidence.sh
+```
+
+The image-mode variables accept `images` (plain) or `bbox_images` (boxed).
+The launcher explicitly routes Teacher views separately from Student views.
+All paths and resources are supplied at runtime; no scheduler submission
+scripts are required.
+
+| Recipe | Teacher views | Notes |
+| --- | --- | --- |
+| `direct-2k-kl` | Global + evidence | Two-view ablation |
+| `direct-2k-three-image-kl` | Global + contextual + evidence | Main method |
+| `direct-2k-three-image-kl-32gpu` | Global + contextual + evidence | Batch 96, three epochs, 2 × 16 GPUs |
+| `direct-2k-kl-mixed` | Global + evidence | Optional extra data via `PA_OPD_VISIONOPD_ROOT` |
+
+All four use the same CAD + KL objective. Paper settings above are not all
+launcher defaults: pass Hydra overrides for the desired experiment, e.g.
+`trainer.total_training_steps=150 actor_rollout_ref.actor.grad_clip=5`.
+The base two-/three-view configs use batch 32 and one epoch; the 32-GPU preset
+sets batch 96 and three epochs. KL defaults to 0.001.
+
+For 32 GPUs, run the launcher on each of two allocated 16-GPU nodes with
+`TRAIN_RECIPE=direct-2k-three-image-kl-32gpu`, `PA_OPD_GPUS_PER_NODE=16`,
+`PA_OPD_NNODES=2`, and `PA_OPD_SAVE_FREQ=30` (optimizer steps).
+Set a shared unique `PA_OPD_LAUNCH_ID`, shared `MASTER_ADDR` / `MASTER_PORT`,
+and each node's `NODE_RANK`. Keep model/data/output paths identical across nodes.
+Batch sizes must be compatible with the topology.
+
+For a 2B Student with a frozen 8B Teacher, use the 2B path as `MODEL_PATH`
+and append:
+
+```text
+actor_rollout_ref.actor.self_distillation.teacher_model_path=/path/to/Qwen3-VL-8B-Instruct
+actor_rollout_ref.actor.self_distillation.fixed_teacher_ema=false
+```
+
+`PA_OPD_MEMORY_PROFILE=low` enables activation offload, one concurrent rollout
+sequence and a smaller rollout context. `PA_OPD_ROLLOUT_TP` must divide GPUs
+per node. These settings reduce memory pressure but do not guarantee freedom
+from OOM. Each training rank reserves a whole Ray GPU; an assignment check
+rejects duplicate devices before model loading.
+
+### Loss reduction and checkpoints
+
+For sampled-token probabilities, the retained objective is
+
+$$r_{i,t}=\operatorname{sg}[\log p^T_{i,t}-\log p^S_{i,t}],\qquad
+A_{i,t}=g_iR_i[R_ir_{i,t}]_+,$$
+
+$$\mathcal L_{\mathrm{CAD}}=
+-\frac{\sum_{i,t}m^{\mathrm{ans}}_{i,t}\operatorname{sg}[\rho_{i,t}]
+\operatorname{sg}[A_{i,t}]\log p^S_{i,t}}{\sum_{i,t}m^{\mathrm{ans}}_{i,t}},
+\qquad \mathcal L=\mathcal L_{\mathrm{CAD}}+\lambda_{\mathrm{KL}}\mathcal L_{\mathrm{KL}}.$$
+
+Here \(g_i\) is Teacher reliability, \(R_i\) is +1 for an exactly correct
+normalized answer set and −1 otherwise, and \(\rho_{i,t}\) is the detached,
+clipped policy importance weight including rollout correction.
+
+CAD uses a Teacher GT-prefix probe (including the final EOS), then keeps only
+sampled-token preferences aligned with Student answer correctness. Valid
+label-bearing answer tokens form its denominator; EOS and punctuation-only
+tokens do not. Teacher presence masks the denominator, while reliability,
+sign selection and importance weights affect only the numerator.
+Reference KL uses the full response mask.
+
+Both terms use **global token mean per optimizer mini-batch**, across all DP
+ranks and accumulated micro-batches. Two token counts are reduced once before
+micro-batch splitting. Each rank backpropagates
+`DP_size × local_masked_sum / max(global_token_count, 1)`; FSDP's gradient
+average cancels the DP-size factor. There is no extra division by accumulation
+steps. The supported reduction path requires Ulysses SP=1.
+Monitor `actor/cad_loss`, `actor/kl_loss`, `actor/grad_norm` and
+`pa_opd/global_{semantic,response}_tokens`.
+
+Resume by adding `RESUME_FROM_PATH=/path/to/checkpoints/global_step_N`
+to the launch environment with the same topology and matching configuration.
+The launcher validates actor/optimizer/extra state, Teacher shards and data
+state. A standalone inference export cannot replace a full resume checkpoint.
+The 32-GPU preset also exports Hugging Face weights under `OUTPUT_DIR/inference`;
+keep full checkpoints separately for resuming. Model/optimizer state layout
+is unchanged by this cleanup.
+
+`WANDB_MODE` defaults to `offline`. Persistent checkpoints, rollouts and logs
+go under `OUTPUT_DIR`; rebuildable caches and Ray sockets use short local
+temporary paths. Internal `pa_opd_*` fields and `PA_OPD_*` variables remain
+for compatibility. Use a fresh output directory for a new experiment.
 
 ## Evaluation
 
-The evaluator sends requests to an OpenAI-compatible model server and supports
-LRS-VQA, MME-RealWorld Remote Sensing, and XLRS-Bench. Install its lightweight
-client dependencies and point it at a running server:
+Run evaluation commands from the repository root. Install the lightweight API
+client dependencies with `python -m pip install -r eval/requirements.txt`.
+Remote evaluation does not need local PyTorch or vLLM. For local Transformers
+inference, LoRA merging or optional semantic scoring, install hardware-matched
+PyTorch/torchvision and `eval/requirements-local.txt`. Local vLLM serving
+additionally needs a compatible vLLM build.
 
-    python3 -m venv .venv-eval
-    .venv-eval/bin/pip install openai pillow datasets
-    .venv-eval/bin/python -m eval.run --dataset lrs-vqa --lrs-root /path/to/lrs-vqa --api-base http://localhost:8000/v1 --model-id your-served-model-name
+| Benchmark | Local layout |
+| --- | --- |
+| LRS-VQA | `LRS_VQA_merged.jsonl`; released image paths or flattened `image/` |
+| MME-RealWorld-RS | `MME_RealWorld.json` with relative image paths; English Perception / Remote Sensing subset |
+| XLRS-Bench | `datasets.load_from_disk` directory containing the benchmark's `train` split |
 
-To create a dedicated vLLM environment and serve a local checkpoint first, run
-MODEL_PATH=/path/to/model LRS_ROOT=/path/to/lrs-vqa BENCHMARK=lrs-vqa bash
-eval/scripts/run_local_vllm.sh. Use --dry-run with eval.run to validate a
-dataset layout before starting a server. Full options are in eval/README.md.
+```bash
+python -m eval.run --dataset lrs-vqa --lrs-root /path/to/LRS-VQA --dry-run
+
+python -m eval.run \
+  --dataset lrs-vqa,mme-realworld-rs,xlrs-bench \
+  --lrs-root /path/to/LRS-VQA \
+  --mme-root /path/to/MME-RealWorld \
+  --xlrs-root /path/to/XLRS-Bench \
+  --api-base http://localhost:8000/v1 \
+  --model-id your-served-model-name \
+  --parallel-workers 32 --run-name evaluation
+```
+
+Results are written incrementally to `eval/results/<run-name>/` as per-benchmark
+JSONL files plus `summary.json`. Rerun with `--resume` to skip completed IDs.
+Use `python -m eval.run --help` and `eval/.env.example` for all options.
+The default image-area cap is 16,777,216 pixels; a 4K input can require about
+15.7K visual tokens, so allow sufficient model context or reduce `--max-pixels`.
+
+Local launchers:
+
+- `eval/scripts/run_local_vllm.sh`: serve and evaluate a Hugging Face checkpoint.
+- `eval/scripts/run_local_transformers.sh`: direct single-sample inference fallback.
+- `eval/scripts/run_openai_compatible.sh`: evaluate an existing endpoint.
+- `eval/scripts/probe_vllm_runtime.sh`: check local devices and vLLM support.
+
+For example:
+
+```bash
+MODEL_PATH=/path/to/huggingface-model \
+SERVED_MODEL_NAME=rs-opsd BENCHMARK=lrs-vqa \
+LRS_ROOT=/path/to/LRS-VQA TP_SIZE=1 \
+bash eval/scripts/run_local_vllm.sh
+```
+
+To export an FSDP actor checkpoint for inference:
+
+```bash
+VERL_ROOT="$PWD/rs-opsd" PYTHON=/path/to/training-python \
+bash eval/scripts/merge_fsdp_checkpoint_to_hf.sh /path/to/global_step_N
+```
+
+`eval/scripts/merge_lora_adapter_to_hf.sh` handles PEFT adapters instead.
+Optional LRS-VQA tolerant scoring accepts
+`--lrs-semantic-model /path/to/bge-base-en-v1.5 --lrs-semantic-threshold 0.85`;
+download that model separately. Strict accuracy stays unchanged, and boolean
+or numeric answers remain exact-only.
 
 ## Reproducibility and artifacts
 

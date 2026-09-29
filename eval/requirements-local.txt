@@ -1,0 +1,10 @@
+# Optional local Transformers inference, LRS semantic scoring and LoRA merging.
+# Install a hardware-compatible torch/torchvision pair BEFORE this file.
+# For local vLLM serving, install a matching vLLM build separately.
+-r requirements.txt
+torch>=2.2
+torchvision
+transformers>=4.57,<6
+accelerate>=1.0
+peft>=0.18
+safetensors>=0.4

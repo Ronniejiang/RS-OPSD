@@ -34,7 +34,6 @@ from verl import DataProto
 from verl.trainer.ppo.core_algos import (
     agg_loss,
     compute_cad_loss,
-    compute_pa_opd_safe_topk_jsd_loss,
     compute_self_distillation_loss,
     get_policy_loss_fn,
     kl_penalty,
@@ -376,27 +375,6 @@ class DataParallelPPOActor(BasePPOActor):
         return visual_encoder.register_forward_hook(hook)
 
     @staticmethod
-    def _merge_topk_support(
-        topk_indices: torch.Tensor,
-        extra_token_ids: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Union Student top-k with mandatory direct-answer grammar tokens."""
-
-        if topk_indices.shape[:2] != extra_token_ids.shape[:2] or extra_token_ids.ndim != 3:
-            raise ValueError("extra top-k token ids must be [batch, response, candidates]")
-        if topk_indices.dtype != torch.long:
-            raise ValueError("top-k token ids must use torch.long")
-        extra_valid = extra_token_ids.ge(0)
-        candidate_ids = torch.cat([topk_indices, extra_token_ids.clamp_min(0)], dim=-1)
-        candidate_valid = torch.cat([torch.ones_like(topk_indices, dtype=torch.bool), extra_valid], dim=-1)
-        sentinel = torch.iinfo(candidate_ids.dtype).max
-        sorted_ids = torch.sort(candidate_ids.masked_fill(~candidate_valid, sentinel), dim=-1).values
-        support_valid = sorted_ids.ne(sentinel)
-        support_valid[..., 1:] &= sorted_ids[..., 1:].ne(sorted_ids[..., :-1])
-        return sorted_ids.masked_fill(~support_valid, 0), support_valid
-
-
-    @staticmethod
     def _add_tail_bucket(log_probs: torch.Tensor) -> torch.Tensor:
         log_s = torch.logsumexp(log_probs, dim=-1, keepdim=True)
         log_s = torch.clamp(log_s, max=-1e-7)
@@ -605,7 +583,6 @@ class DataParallelPPOActor(BasePPOActor):
         calculate_entropy: bool = False,
         return_all_logps: bool = False,
         distill_topk: Optional[int] = None,
-        topk_extra_indices: Optional[torch.Tensor] = None,
         topk_indices: Optional[torch.Tensor] = None,
         module: Optional[nn.Module] = None,
     ) -> dict[str, torch.Tensor]:
@@ -626,10 +603,6 @@ class DataParallelPPOActor(BasePPOActor):
         use_topk = distill_topk is not None or topk_indices is not None
         compute_all_logps = return_all_logps and not use_topk
         return_topk_indices = use_topk and topk_indices is None
-        if topk_extra_indices is not None and (distill_topk is None or topk_indices is not None):
-            raise ValueError("extra top-k support requires a Student distillation_topk forward.")
-        if topk_extra_indices is not None and self.use_remove_padding:
-            raise ValueError("extra top-k support requires use_remove_padding=False.")
         if (return_all_logps or use_topk) and self.use_fused_kernels:
             raise ValueError("Logit distillation requires disabling fused kernels.")
 
@@ -1042,11 +1015,6 @@ class DataParallelPPOActor(BasePPOActor):
                         if topk_indices is None:
                             topk = min(distill_topk, logits.size(-1))
                             topk_logits, topk_indices = torch.topk(logits, topk, dim=-1)
-                            if topk_extra_indices is not None:
-                                topk_indices, topk_valid_mask = self._merge_topk_support(
-                                    topk_indices, topk_extra_indices.to(device=logits.device, dtype=torch.long)
-                                )
-                                topk_logits = torch.gather(logits, dim=-1, index=topk_indices)
                         else:
                             topk_logits = torch.gather(logits, dim=-1, index=topk_indices)
                         logsumexp = torch.logsumexp(logits, dim=-1, keepdim=True)
@@ -1075,8 +1043,6 @@ class DataParallelPPOActor(BasePPOActor):
                 outputs["topk_logps"] = topk_logps
                 if return_topk_indices:
                     outputs["topk_indices"] = topk_indices
-                if topk_extra_indices is not None:
-                    outputs["topk_valid_mask"] = topk_valid_mask
             return outputs
 
     def _optimizer_step(self):
@@ -1206,12 +1172,10 @@ class DataParallelPPOActor(BasePPOActor):
         self_distillation_cfg = getattr(self.config, "self_distillation", None)
         pa_opd_enabled = False
         pa_opd_direct_answer = False
-        pa_opd_topk_jsd_enabled = False
         if self_distillation_enabled:
             if self_distillation_cfg is None:
                 raise ValueError(f"loss_mode={loss_mode} requires actor.self_distillation config.")
             pa_opd_enabled = bool(self_distillation_cfg.get("pa_opd_enabled", False))
-            pa_opd_topk_jsd_enabled = bool(self_distillation_cfg.get("pa_opd_topk_jsd_enabled", False))
             pa_opd_direct_answer = bool(self_distillation_cfg.get("pa_opd_direct_answer", False))
             self_distillation_required_keys = {
                 "teacher_input_ids",
@@ -1246,10 +1210,6 @@ class DataParallelPPOActor(BasePPOActor):
                 self_distillation_required_keys.update(
                     {"pa_opd_probe_response_mask", "pa_opd_probe_allowed_token_ids"}
                 )
-                if pa_opd_topk_jsd_enabled:
-                    self_distillation_required_keys.update(
-                        {"pa_opd_jsd_target_token_ids", "pa_opd_jsd_allowed_token_ids", "pa_opd_jsd_prefix_mask"}
-                    )
             assert self_distillation_required_keys.issubset(set(data.batch.keys())), f"Missing required keys: {self_distillation_required_keys - set(data.batch.keys())}"
 
 
@@ -1321,8 +1281,6 @@ class DataParallelPPOActor(BasePPOActor):
                 metrics["actor/distillation_loss"] = 0.0
                 if pa_opd_global_token_mean:
                     metrics["pa_opd/global_token_mean"] = 1.0
-                    if pa_opd_topk_jsd_enabled:
-                        metrics["actor/topk_jsd_loss"] = 0.0
             else:
                 metrics["actor/vopd_loss"] = 0.0
                 metrics["actor/vopd_loss_weighted"] = 0.0
@@ -1348,13 +1306,11 @@ class DataParallelPPOActor(BasePPOActor):
                     if pa_opd_global_token_mean else None
                 )
                 semantic_reduction = token_mean.kwargs("semantic") if token_mean is not None else {}
-                jsd_reduction = token_mean.kwargs("jsd_prefix") if token_mean is not None else {}
                 response_reduction = token_mean.kwargs("response") if token_mean is not None else {}
                 if token_mean is not None:
                     append_to_dict(metrics, {
                         "pa_opd/global_semantic_tokens": token_mean.counts[0].item(),
-                        "pa_opd/global_jsd_prefix_tokens": token_mean.counts[1].item(),
-                        "pa_opd/global_response_tokens": token_mean.counts[2].item(),
+                        "pa_opd/global_response_tokens": token_mean.counts[1].item(),
                     })
                 if self.config.use_dynamic_bsz:
                     max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
@@ -1404,9 +1360,6 @@ class DataParallelPPOActor(BasePPOActor):
                     # all return: (bsz, response_length)
                     return_all_logps = self_distillation_cfg.full_logit_distillation and not self_distillation_cfg.distillation_topk
                     distill_topk = self_distillation_cfg.distillation_topk if self_distillation_cfg.full_logit_distillation else None
-                    topk_extra_indices = (
-                        model_inputs["pa_opd_jsd_allowed_token_ids"] if pa_opd_topk_jsd_enabled else None
-                    )
                     student_forward_start = time.perf_counter()
                     outputs = self._forward_micro_batch(
                         model_inputs,
@@ -1414,7 +1367,6 @@ class DataParallelPPOActor(BasePPOActor):
                         calculate_entropy=calculate_entropy,
                         return_all_logps=return_all_logps,
                         distill_topk=distill_topk,
-                        topk_extra_indices=topk_extra_indices,
                     )
                     if self_distillation_enabled:
                         student_forward_time = time.perf_counter() - student_forward_start
@@ -1422,7 +1374,6 @@ class DataParallelPPOActor(BasePPOActor):
                     log_prob = outputs["log_probs"]
                     entropy = outputs["entropys"] if calculate_entropy else None
                     student_all_logps = outputs.get("all_logps") if return_all_logps else None
-                    student_topk_valid_mask = outputs.get("topk_valid_mask") if pa_opd_topk_jsd_enabled else None
                     student_topk_logps = outputs.get("topk_logps") if distill_topk else None
                     student_topk_indices = outputs.get("topk_indices") if distill_topk else None
 
@@ -1624,42 +1575,8 @@ class DataParallelPPOActor(BasePPOActor):
                                 loss_agg_mode=loss_agg_mode,
                                 **semantic_reduction,
                             )
-                            # CAD is the sampled-answer objective only; optional
-                            # JSD is reported separately and in distillation_loss.
+                            # CAD is the sampled-answer objective.
                             metrics["actor/cad_loss"] += vopd_loss.detach().item() * loss_scale_factor
-                            if pa_opd_topk_jsd_enabled:
-                                if any(
-                                    item is None
-                                    for item in (student_topk_logps, student_topk_indices, student_topk_valid_mask, teacher_topk_logps)
-                                ):
-                                    raise RuntimeError("PA-OPD top-k JSD is missing shared Student/Teacher logits.")
-                                jsd_loss, jsd_metrics = compute_pa_opd_safe_topk_jsd_loss(
-                                    student_topk_log_probs=student_topk_logps,
-                                    teacher_topk_log_probs=teacher_topk_logps,
-                                    topk_token_ids=student_topk_indices,
-                                    topk_valid_mask=student_topk_valid_mask,
-                                    target_token_ids=model_inputs["pa_opd_jsd_target_token_ids"],
-                                    allowed_token_ids=model_inputs["pa_opd_jsd_allowed_token_ids"],
-                                    prefix_mask=model_inputs["pa_opd_jsd_prefix_mask"],
-                                    teacher_reliable=teacher_reliable,
-                                    self_distillation_config=self_distillation_cfg,
-                                    teacher_present_mask=self_distillation_mask,
-                                    student_log_probs=log_prob,
-                                    old_log_probs=old_log_prob,
-                                    rollout_is_weights=rollout_is_weights,
-                                    loss_agg_mode=loss_agg_mode,
-                                    **jsd_reduction,
-                                )
-                                jsd_coef = self_distillation_cfg.get("pa_opd_topk_jsd_coef", 1.0)
-                                vopd_metrics.update(jsd_metrics)
-                                if pa_opd_global_token_mean:
-                                    # Sum micro contributions; trainer's rank mean
-                                    # then reports the same global objective as backward.
-                                    metrics["actor/topk_jsd_loss"] += jsd_loss.detach().item()
-                                else:
-                                    vopd_metrics["actor/topk_jsd_loss"] = jsd_loss.detach().item()
-                                vopd_metrics["actor/topk_jsd_coef"] = jsd_coef
-                                vopd_loss = vopd_loss + jsd_coef * jsd_loss
                         else:
                             vopd_loss, vopd_metrics = compute_self_distillation_loss(
                                 student_log_probs=log_prob,
@@ -1685,7 +1602,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                         if pa_opd_enabled:
                             # The retained direct protocol is reward-free: its policy
-                            # gradient is exactly CAD (plus optional native KL/JSD).
+                            # gradient is exactly CAD (plus reference KL).
                             grpo_loss = None
                             pg_loss = vopd_loss
                         elif policy_fallback_mask is not None and policy_fallback_mask.any().item():

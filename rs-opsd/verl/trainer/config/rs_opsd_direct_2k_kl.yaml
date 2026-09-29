@@ -25,7 +25,7 @@ actor_rollout_ref:
   actor:
     ppo_mini_batch_size: 32
     # One global token denominator per optimizer mini-batch, across DP ranks
-    # and accumulated micro-batches; CAD/JSD/KL use their respective masks.
+    # and accumulated micro-batches; CAD/KL use their respective masks.
     loss_agg_mode: token-mean
     use_dynamic_bsz: true
     ppo_max_token_len_per_gpu: 10240

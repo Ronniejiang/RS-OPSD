@@ -44,15 +44,6 @@ class DirectProbePlan:
     canonical_answer: str
 
 
-@dataclass(frozen=True)
-class DirectJSDTokenMetadata:
-    """GT-aligned direct-answer positions used by safe top-k JSD."""
-
-    target_token_ids: torch.Tensor
-    allowed_token_ids: torch.Tensor
-    prefix_mask: torch.Tensor
-
-
 def build_direct_probe_plan(
     tokenizer: Any,
     prompt_text: str,
@@ -178,60 +169,6 @@ def build_direct_option_token_mask(
     return answer_mask.to(dtype=response_mask.dtype), valid, parsed_results
 
 
-def build_direct_jsd_token_metadata(
-    response_ids: torch.Tensor,
-    response_mask: torch.Tensor,
-    answer_token_mask: torch.Tensor,
-    plans: Sequence[DirectProbePlan],
-) -> DirectJSDTokenMetadata:
-    """Map a rollout onto the GT grammar until its first answer divergence."""
-
-    if response_ids.shape != response_mask.shape or response_ids.shape != answer_token_mask.shape:
-        raise ValueError("response ids, mask, and answer mask must have identical shapes")
-    if len(plans) != response_ids.shape[0]:
-        raise ValueError("plans must provide one GT grammar per response")
-
-    batch_size, response_length = response_ids.shape
-    max_candidates = max(len(candidates) for plan in plans for candidates in plan.allowed_token_ids)
-    target_token_ids = torch.full_like(response_ids, -1)
-    allowed_token_ids = torch.full(
-        (batch_size, response_length, max_candidates),
-        -1,
-        dtype=torch.long,
-        device=response_ids.device,
-    )
-    prefix_mask = torch.zeros_like(response_mask)
-
-    for row_idx, plan in enumerate(plans):
-        plan_step = 0
-        prefix_matches_gt = True
-        active_positions = response_mask[row_idx].bool().nonzero(as_tuple=False).flatten().tolist()
-        for position in active_positions:
-            token_id = int(response_ids[row_idx, position].item())
-            is_label = bool(answer_token_mask[row_idx, position].item())
-            is_eos = token_id == plan.response_token_ids[-1]
-            if not is_label and not is_eos:
-                continue
-            if plan_step >= len(plan.response_token_ids):
-                break
-            if prefix_matches_gt:
-                expected_id = plan.response_token_ids[plan_step]
-                prefix_mask[row_idx, position] = 1
-                target_token_ids[row_idx, position] = expected_id
-                candidates = plan.allowed_token_ids[plan_step]
-                allowed_token_ids[row_idx, position, : len(candidates)] = torch.tensor(
-                    candidates, dtype=torch.long, device=response_ids.device
-                )
-                if token_id != expected_id:
-                    prefix_matches_gt = False
-            if is_eos:
-                break
-            if is_label:
-                plan_step += 1
-
-    return DirectJSDTokenMetadata(target_token_ids, allowed_token_ids, prefix_mask)
-
-
 def compute_constrained_teacher_reliability(
     all_log_probs: torch.Tensor,
     target_token_ids: torch.Tensor,
@@ -269,9 +206,7 @@ def compute_constrained_teacher_reliability(
 
 
 __all__ = [
-    "DirectJSDTokenMetadata",
     "DirectProbePlan",
-    "build_direct_jsd_token_metadata",
     "build_direct_option_token_mask",
     "build_direct_probe_plan",
     "compute_constrained_teacher_reliability",

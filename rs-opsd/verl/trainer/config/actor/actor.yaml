@@ -92,7 +92,7 @@ self_distillation:
   # Whether to add a tail bucket when using distillation_topk
   distillation_add_tail: True
 
-  # KL interpolation coefficient: 0.0=forward KL, 1.0=reverse KL, in-between=JSD
+  # KL direction: 0.0=forward KL, 1.0=reverse KL
   alpha: 0.5 
 
   # Loss weight used for SDPO when combined with policy optimization in OPD mode

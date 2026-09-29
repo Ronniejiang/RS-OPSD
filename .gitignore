@@ -66,8 +66,6 @@ submit*.py
 /rs-opsd/docker/
 /rs-opsd/.runtime*/
 /rs-opsd/docs/*
-!/rs-opsd/docs/global_token_mean.md
-!/rs-opsd/docs/rs_opsd_cad_migration.md
 /eval/dashboards/
 /experiments/
 /local_git_sha.txt

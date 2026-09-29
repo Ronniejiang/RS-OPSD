@@ -10,7 +10,7 @@ usage() {
   cat <<'USAGE'
 Usage:
   MODEL_PATH=/path/to/model DATA_ROOT=/path/to/data OUTPUT_DIR=/path/to/output \
-    bash scripts/train.sh {direct-2k-kl|direct-2k-kl-mixed|direct-2k-topk64-jsd-kl|direct-2k-three-image-kl|direct-2k-three-image-topk64-jsd-kl} [Hydra overrides...]
+    bash scripts/train.sh {direct-2k-kl|direct-2k-kl-mixed|direct-2k-three-image-kl|direct-2k-three-image-kl-32gpu} [Hydra overrides...]
 
 Optional environment variables:
   PYTHON=python              Python executable (default: python)
@@ -21,7 +21,7 @@ Optional environment variables:
   PA_OPD_VISIONOPD_ROOT=/path/to/VisionOPD  Additional source for direct-2k-kl-mixed
   PA_OPD_SAVE_FREQ=30         Required by direct-2k-three-image-kl-32gpu
 
-Multi-node recipe: direct-2k-three-image-kl-32gpu (run once per Fuyao pod).
+Multi-node recipe: direct-2k-three-image-kl-32gpu (run once per allocated node).
 USAGE
 }
 
@@ -31,10 +31,8 @@ shift
 case "${recipe}" in
   direct-2k-kl) config_name="rs_opsd_direct_2k_kl" ;;
   direct-2k-kl-mixed) config_name="rs_opsd_direct_2k_kl_mixed" ;;
-  direct-2k-topk64-jsd-kl) config_name="rs_opsd_direct_2k_topk64_jsd_kl" ;;
   direct-2k-three-image-kl) config_name="rs_opsd_direct_2k_three_image_kl" ;;
   direct-2k-three-image-kl-32gpu) config_name="rs_opsd_direct_2k_three_image_kl_32gpu" ;;
-  direct-2k-three-image-topk64-jsd-kl) config_name="rs_opsd_direct_2k_three_image_topk64_jsd_kl" ;;
   *) echo "ERROR: unsupported recipe: ${recipe}" >&2; usage >&2; exit 2 ;;
 esac
 
@@ -54,7 +52,7 @@ fi
 [[ -f "${DATA_ROOT}/train.jsonl" ]] || { echo "ERROR: missing ${DATA_ROOT}/train.jsonl" >&2; exit 1; }
 [[ -d "${DATA_ROOT}/images" ]] || { echo "ERROR: missing ${DATA_ROOT}/images" >&2; exit 1; }
 [[ -d "${DATA_ROOT}/teacher_images" ]] || { echo "ERROR: missing ${DATA_ROOT}/teacher_images" >&2; exit 1; }
-if [[ "${recipe}" == direct-2k-three-image-kl || "${recipe}" == direct-2k-three-image-kl-32gpu || "${recipe}" == direct-2k-three-image-topk64-jsd-kl ]]; then
+if [[ "${recipe}" == direct-2k-three-image-kl || "${recipe}" == direct-2k-three-image-kl-32gpu ]]; then
   [[ -f "${DATA_ROOT}/derived/train.jsonl" ]] || { echo "ERROR: three-image recipe requires derived/train.jsonl" >&2; exit 1; }
   [[ -d "${DATA_ROOT}/derived/teacher_images" ]] || { echo "ERROR: three-image recipe requires derived/teacher_images" >&2; exit 1; }
 fi

@@ -1,0 +1,12 @@
+# Upstream runtime targeting vLLM 0.18 with native Qwen3-VL support.
+# These pins are not a universal hardware compatibility guarantee. Use builds
+# matched to your driver/accelerator; do not overwrite a working vendor runtime
+# with these upstream wheels. Install requirements-core.txt separately instead.
+torch==2.10.0
+torchvision==0.25.0
+# Upstream vLLM 0.18 requires Transformers <5.
+transformers>=4.57.3,<5
+vllm==0.18.0
+ray[default]==2.53.0
+tensordict==0.10.0
+torchdata==0.11.0

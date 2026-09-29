@@ -39,7 +39,7 @@ echo "Starting RS-OPSD launcher: rollout TP=${PA_OPD_ROLLOUT_TP}, devices=${PA_O
   exit 2
 }
 case "${TRAIN_RECIPE}" in
-  direct-2k-kl|direct-2k-kl-mixed|direct-2k-topk64-jsd-kl|direct-2k-three-image-kl|direct-2k-three-image-kl-32gpu|direct-2k-three-image-topk64-jsd-kl) ;;
+  direct-2k-kl|direct-2k-kl-mixed|direct-2k-three-image-kl|direct-2k-three-image-kl-32gpu) ;;
   *)
     echo "ERROR: unsupported direct GeoEvidence recipe: ${TRAIN_RECIPE}" >&2
     exit 2

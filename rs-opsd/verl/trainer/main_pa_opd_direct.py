@@ -9,8 +9,6 @@ import numpy as np
 import torch
 
 from verl.trainer.ppo.pa_opd_direct import (
-    DirectProbePlan,
-    build_direct_jsd_token_metadata,
     build_direct_option_token_mask,
 )
 from verl.utils.reward_score.pa_opd_direct_protocol import canonicalize_option_set
@@ -140,28 +138,6 @@ def _install_direct_hooks() -> None:
                 ],
                 dtype=np.float32,
             )
-            topk_jsd_enabled = bool(
-                self.config.actor_rollout_ref.actor.self_distillation.get("pa_opd_topk_jsd_enabled", False)
-            )
-            if topk_jsd_enabled:
-                probe_ids = batch.batch["pa_opd_probe_responses"]
-                probe_mask = batch.batch["pa_opd_probe_response_mask"]
-                probe_allowed = batch.batch["pa_opd_probe_allowed_token_ids"]
-                plans = []
-                for row_idx, canonical_target in enumerate(canonical_targets):
-                    target_length = int(probe_mask[row_idx].sum().item())
-                    response_token_ids = tuple(int(token) for token in probe_ids[row_idx, :target_length].tolist())
-                    allowed_token_ids = tuple(
-                        tuple(int(token) for token in row.tolist() if token >= 0)
-                        for row in probe_allowed[row_idx, :target_length]
-                    )
-                    plans.append(DirectProbePlan(response_token_ids, allowed_token_ids, canonical_target))
-                jsd_metadata = build_direct_jsd_token_metadata(
-                    response_ids, response_mask, answer_mask, plans
-                )
-                batch.batch["pa_opd_jsd_target_token_ids"] = jsd_metadata.target_token_ids
-                batch.batch["pa_opd_jsd_allowed_token_ids"] = jsd_metadata.allowed_token_ids
-                batch.batch["pa_opd_jsd_prefix_mask"] = jsd_metadata.prefix_mask
             batch.batch["pa_opd_semantic_token_mask"] = answer_mask
             batch.batch["pa_opd_answer_token_mask"] = answer_mask
             batch.batch["pa_opd_trajectory_correct"] = torch.as_tensor(

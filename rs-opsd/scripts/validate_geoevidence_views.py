@@ -12,12 +12,12 @@ from verl.utils.dataset.pa_opd_dataset import (
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--data-root", type=Path, required=True)
-    parser.add_argument("--recipe", required=True, choices=["direct-2k-kl", "direct-2k-topk64-jsd-kl", "direct-2k-three-image-kl", "direct-2k-three-image-topk64-jsd-kl"])
+    parser.add_argument("--recipe", required=True, choices=["direct-2k-kl", "direct-2k-three-image-kl"])
     parser.add_argument("--student-view", choices=["images", "bbox_images"], required=True)
     parser.add_argument("--teacher-full-view", choices=["images", "bbox_images"], required=True)
     args = parser.parse_args()
     root = args.data_root.resolve()
-    three = args.recipe in ("direct-2k-three-image-kl", "direct-2k-three-image-topk64-jsd-kl")
+    three = args.recipe == "direct-2k-three-image-kl"
     loader = load_pa_opd_direct_three_image_jsonl if three else load_pa_opd_direct_jsonl
     dataset = loader(root / "train.jsonl", student_image_mode=args.student_view,
                      teacher_full_image_mode=args.teacher_full_view, separate_teacher_views=True)

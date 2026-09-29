@@ -4,7 +4,8 @@
 [build-system]
 requires = [
     "setuptools>=61.0",
-    "wheel"
+    "wheel",
+    "packaging>=24.2"
 ]
 build-backend = "setuptools.build_meta"
 
@@ -15,9 +16,9 @@ build-backend = "setuptools.build_meta"
 name = "verl"
 dynamic = ["version"]
 
-description = "OPD-V training and evaluation code"
+description = "RS-OPSD training code built on verl"
 license = {text = "Apache-2.0"}
-readme = {file = "README.md", content-type = "text/markdown"}
+readme = {text = "RS-OPSD training code. Installation and usage: https://github.com/Ronniejiang/RS-OPSD#rs-opsd-training", content-type = "text/markdown"}
 requires-python = ">=3.10"
 
 dependencies = []
@@ -80,6 +81,9 @@ version = {file = "verl/version/version"}
 
 [tool.setuptools.package-dir]
 "" = "."
+
+[tool.setuptools.packages.find]
+include = ["verl*"]
 
 [tool.setuptools.package-data]
 verl = [

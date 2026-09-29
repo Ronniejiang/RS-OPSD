@@ -14,8 +14,6 @@ actor_rollout_ref:
       save_contents: [model, optimizer, extra, hf_model]
       load_contents: [model, optimizer, extra]
       hf_model_dir: ${oc.env:PA_OPD_WORK_DIR}/inference
-    self_distillation:
-      pa_opd_topk_jsd_enabled: false
   rollout:
     n: 1
 

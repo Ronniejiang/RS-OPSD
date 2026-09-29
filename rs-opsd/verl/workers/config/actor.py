@@ -42,7 +42,7 @@ class SelfDistillationConfig(BaseConfig):
     Args:
         Distillation is enabled when policy_loss.loss_mode is "vopd".
         full_logit_distillation (bool): Whether to use full-logit KL distillation.
-        alpha (float): KL interpolation coefficient. 0.0=forward KL, 1.0=reverse KL, in-between=JSD.
+        alpha (float): KL direction: 0.0=forward KL, 1.0=reverse KL.
         gamma (float): Weight applied to the SDPO loss.
         success_reward_threshold (float): Minimum sequence reward to be considered successful.
         teacher_regularization (str): Teacher regularization mode. Options: "ema", "trust-region", "progressive".
@@ -146,13 +146,9 @@ class SelfDistillationConfig(BaseConfig):
     # constrained multi-token GT reliability probe for option sets.
     pa_opd_direct_answer: bool = False
     pa_opd_reward_free: bool = False
-    # Optional GT-safe top-k JSD augmentation for direct RS-OPSD.
-    pa_opd_topk_jsd_enabled: bool = False
-    pa_opd_topk_jsd_coef: float = 1.0
-
     def __post_init__(self):
-        if not 0.0 <= self.alpha <= 1.0:
-            raise ValueError(f"self_distillation.alpha must be in [0,1], got {self.alpha}")
+        if self.alpha not in (0.0, 1.0):
+            raise ValueError(f"self_distillation.alpha must be 0 (forward KL) or 1 (reverse KL), got {self.alpha}")
         if self.gamma < 0.0:
             raise ValueError(f"self_distillation.gamma must be non-negative, got {self.gamma}")
         valid_teacher_regularization = ["ema", "trust-region", "progressive"]
@@ -205,26 +201,12 @@ class SelfDistillationConfig(BaseConfig):
                 )
             if self.contrastive_visual_advantage:
                 raise ValueError("PA-OPD and contrastive_visual_advantage cannot be enabled together.")
-            if self.pa_opd_topk_jsd_enabled:
-                if not self.pa_opd_direct_answer:
-                    raise ValueError("PA-OPD top-k JSD requires pa_opd_direct_answer=True.")
-                if not self.full_logit_distillation:
-                    raise ValueError("PA-OPD top-k JSD requires full_logit_distillation=True.")
-                if self.alpha != 0.5:
-                    raise ValueError("PA-OPD top-k JSD requires alpha=0.5.")
-                if self.distillation_topk is None:
-                    raise ValueError("PA-OPD top-k JSD requires distillation_topk.")
-                if not self.distillation_add_tail:
-                    raise ValueError("PA-OPD top-k JSD requires distillation_add_tail=True.")
-                if self.pa_opd_topk_jsd_coef < 0.0:
-                    raise ValueError("PA-OPD top-k JSD coefficient must be non-negative.")
-            else:
-                if self.full_logit_distillation:
-                    raise ValueError("RS-OPSD requires sampled-token distillation unless top-k JSD is enabled.")
-                if self.alpha != 1.0:
-                    raise ValueError("RS-OPSD CAD requires alpha=1.0 for its signed sampled-token objective.")
-                if self.distillation_topk is not None:
-                    raise ValueError("RS-OPSD does not use top-k/full-vocabulary distillation logits.")
+            if self.full_logit_distillation:
+                raise ValueError("RS-OPSD requires sampled-token CAD distillation.")
+            if self.alpha != 1.0:
+                raise ValueError("RS-OPSD CAD requires alpha=1.0 for its signed sampled-token objective.")
+            if self.distillation_topk is not None:
+                raise ValueError("RS-OPSD does not use top-k/full-vocabulary distillation logits.")
         if self.pa_opd_direct_answer and not self.pa_opd_enabled:
             raise ValueError("pa_opd_direct_answer requires pa_opd_enabled=True.")
         if self.pa_opd_reward_free:
