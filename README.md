@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="figures/logo_01.png" width="96" alt="RS-OPSD logo: a globe with a magnifying glass" />
+  <img src="figures/logo_01.png" width="72" alt="RS-OPSD logo: a globe with a magnifying glass" />
 </p>
 
 <h1 align="center">
@@ -21,37 +21,30 @@
 </p>
 
 Average scores across **XLRS-Bench**, **MME-RealWorld-RS**, and **LRS-VQA**.
-RS-OPSD achieves the best results on all three benchmarks among the methods
+<img src="figures/rs_opsd_name.svg" height="20" alt="RS-OPSD" /> achieves the best results on all three benchmarks among the methods
 compared in the paper, improving the average score over the strongest competing
 method, ZoomSearch, by **4.0 percentage points**.
 
 | Model | Inference model size | XLRS-Bench | MME-RealWorld-RS | LRS-VQA | Average | Latency (s/sample) |
 | --- | --- | --- | --- | --- | --- | --- |
 | Qwen3-VL-8B-Instruct | 8B | 50.5 | 41.9 | 30.1 | 40.8 | 1.75 |
-| RS-OPD-Lite | 2B | 45.8 | 56.2 | 30.5 | 44.2 | **1.09** |
-| RS-OPSD | 8B | **53.1** | **61.5** | **33.3** | **49.3** | 1.58 |
+| <img src="figures/rs_opd_lite_name.svg" height="20" alt="RS-OPD-Lite" /> | 2B | 45.8 | 56.2 | 30.5 | 44.2 | **1.09** |
+| <img src="figures/rs_opsd_name.svg" height="20" alt="RS-OPSD" /> | 8B | **53.1** | **61.5** | **33.3** | **49.3** | 1.58 |
 
 Latency is measured on a **single NVIDIA H100 with batch size 1**, averaged
 across the three benchmarks under the paper's evaluation protocol.
-RS-OPD-Lite surpasses most evaluated 8B-scale models and achieves the lowest
+<img src="figures/rs_opd_lite_name.svg" height="20" alt="RS-OPD-Lite" /> surpasses most evaluated 8B-scale models and achieves the lowest
 measured latency—**12.8% lower** than the second-fastest method.
 Neither variant requires additional visual search or external tool calls at
 inference time.
 
 ## Method overview
 
-**Can the benefit of zoom-in evidence be internalized during training, rather
-than requiring visual search or tool use at inference time?**
-
-Ultra-high-resolution remote sensing VQA requires resolving small visual
-evidence within images containing tens of millions of pixels. RS-OPSD is a
-**reliable privileged on-policy self-distillation** framework that transfers
-training-time visual privilege to a student using the standard global input.
-This repository contains its training and evaluation code.
-
-Simply using a tight evidence crop as teacher privilege is insufficient: crops
-can discard important context, and an imperfect teacher can supply conflicting
-supervision. RS-OPSD addresses these two bottlenecks with CPVP and CAD.
+<table>
+  <tr>
+    <td><em>Can the benefit of zoom-in evidence be internalized during training, rather than requiring visual search or tool use at inference time?</em></td>
+  </tr>
+</table>
 
 <p align="center">
   <img src="figures/RS-OPSD_01.png" width="1200" alt="RS-OPSD architecture: global, contextual and fine-grained evidence for CPVP; teacher reliability probing, correctness-aligned token filtering and reference KL regularization for CAD" />
@@ -75,16 +68,6 @@ CAD filters supervision at two levels:
   preferences that reinforce the sampled tokens; for an incorrect answer,
   retain preferences that suppress them. Unreliable or conflicting signals are
   discarded.
-
-The CAD loss is normalized over valid answer tokens and combined with KL
-regularization toward the frozen reference. Gradient-norm clipping stabilizes
-optimization. RS-OPSD initializes the teacher from its 8B student and updates it
-by **exponential moving average (EMA)**. RS-OPD-Lite instead uses a **2B student
-and a frozen 8B privileged teacher**, retaining only the 2B student at inference.
-
-Privileged crops and training-time evidence annotations are not required at
-inference. Evaluation uses the original benchmark inputs, without introducing
-additional boxes, crop coordinates, or localization cues.
 
 ## GeoEvidence-6K
 
@@ -142,17 +125,17 @@ experiment logs, and other generated artifacts.
 
 | Path | Purpose |
 | --- | --- |
-| `rs-opsd/` | RS-OPSD training implementation, configurations, unit tests, and runtime launchers. |
+| `rs-opsd/` | <img src="figures/rs_opsd_name.svg" height="20" alt="RS-OPSD" /> training implementation, configurations, unit tests, and runtime launchers. |
 | `eval/` | OpenAI-compatible evaluator for LRS-VQA, MME-RealWorld Remote Sensing, and XLRS-Bench. |
 | `eval/scripts/` | Local evaluation and environment launchers. |
 
 
-## RS-OPSD training
+## <img src="figures/rs_opsd_name.svg" height="28" alt="RS-OPSD" /> training
 
 The main experiments train exclusively on GeoEvidence-6K with **one rollout
 per sample**, a **global batch size of 96**, **KL coefficient 0.001**, and
-**gradient-norm clipping threshold 5**. RS-OPSD is trained for **150 steps**;
-RS-OPD-Lite is trained for **120 steps**. These are the paper's reported settings;
+**gradient-norm clipping threshold 5**. <img src="figures/rs_opsd_name.svg" height="20" alt="RS-OPSD" /> is trained for **150 steps**;
+<img src="figures/rs_opd_lite_name.svg" height="20" alt="RS-OPD-Lite" /> is trained for **120 steps**. These are the paper's reported settings;
 select the appropriate model, teacher-update policy, and runtime configuration
 when reproducing either variant.
 
@@ -201,4 +184,15 @@ scheduler-specific submission scripts.
 
 ## License
 
-RS-OPSD is distributed under the [Apache-2.0 license](rs-opsd/LICENSE).
+<img src="figures/rs_opsd_name.svg" height="20" alt="RS-OPSD" /> is distributed under the [Apache-2.0 license](rs-opsd/LICENSE).
+
+## Citations and acknowledgements
+
+We acknowledge the benchmarks and prior work below. Please cite the relevant
+original papers when using their datasets or building on their methods.
+MME-RealWorld-RS refers to the remote-sensing subset of MME-RealWorld.
+
+- **XLRS-Bench** — Fengxiang Wang et al. *XLRS-Bench: Could Your Multimodal LLMs Understand Extremely Large Ultra-High-Resolution Remote Sensing Imagery?* CVPR 2025. [Paper](https://arxiv.org/abs/2503.23771) · [Code and dataset](https://github.com/AI9Stars/XLRS-Bench).
+- **MME-RealWorld** — Yi-Fan Zhang et al. *MME-RealWorld: Could Your Multimodal LLM Challenge High-Resolution Real-World Scenarios that are Difficult for Humans?* ICLR 2025. [Paper](https://arxiv.org/abs/2408.13257) · [Project page](https://mme-realworld.github.io/).
+- **LRS-VQA** — Junwei Luo et al. *When Large Vision-Language Model Meets Large Remote Sensing Imagery: Coarse-to-Fine Text-Guided Token Pruning.* ICCV 2025. [Paper](https://arxiv.org/abs/2503.07588) · [Code and dataset](https://github.com/VisionXLab/LRS-VQA).
+- **Vision-OPD** — Qianhao Yuan et al. *Vision-OPD: Learning to See Fine Details for Multimodal LLMs via On-Policy Self-Distillation.* arXiv, 2026. [Paper](https://arxiv.org/abs/2605.18740).
