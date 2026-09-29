@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="164" viewBox="0 0 1100 164" role="img" aria-labelledby="title desc">
+  <title id="title">RS-OPSD: Reliable Privileged On-Policy Self-Distillation for Ultra-High-Resolution Remote Sensing VQA</title>
+  <desc id="desc">The RS-OPSD name and the acronym letters in the full title are highlighted in army green, #6F7A3A.</desc>
+  <style>
+    text { font-family: Arial, Helvetica, sans-serif; font-weight: 600; fill: #24292f; }
+    .accent { fill: #6F7A3A; }
+    @media (prefers-color-scheme: dark) { text { fill: #e6edf3; } .accent { fill: #6F7A3A; } }
+  </style>
+  <text x="550" y="48" text-anchor="middle" font-size="46"><tspan class="accent">RS-OPSD</tspan>:</text>
+  <text x="550" y="99" text-anchor="middle" font-size="33">Reliable Privileged <tspan class="accent">O</tspan>n-<tspan class="accent">P</tspan>olicy <tspan class="accent">S</tspan>elf-<tspan class="accent">D</tspan>istillation</text>
+  <text x="550" y="146" text-anchor="middle" font-size="33">for Ultra-High-Resolution <tspan class="accent">R</tspan>emote <tspan class="accent">S</tspan>ensing VQA</text>
+</svg>
