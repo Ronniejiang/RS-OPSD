@@ -10,7 +10,7 @@
   <a href="https://huggingface.co/datasets/ronniejiangC/GeoEvidence-6K"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Dataset-GeoEvidence--6K-6F7A3A" alt="Hugging Face dataset: GeoEvidence-6K" /></a>
   <a href="https://huggingface.co/ronniejiangC/RS-OPD-Lite"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Model-RS--OPD--Lite%20%282B%29-6F7A3A" alt="Hugging Face model: RS-OPD-Lite (2B)" /></a>
   <a href="https://huggingface.co/ronniejiangC/RS-OPSD"><img src="https://img.shields.io/badge/%F0%9F%A4%97%20Model-RS--OPSD%20%288B%29-6F7A3A" alt="Hugging Face model: RS-OPSD (8B)" /></a>
-  <a href="#paper"><img src="https://img.shields.io/badge/arXiv-Coming%20Soon-B31B1B?logo=arxiv&amp;logoColor=white" alt="arXiv paper: coming soon" /></a>
+  <a href="https://arxiv.org/abs/2609.38072"><img src="https://img.shields.io/badge/arXiv-2609.38072-B31B1B?logo=arxiv&amp;logoColor=white" alt="arXiv paper: 2609.38072" /></a>
   <a href="#paper"><img src="https://img.shields.io/badge/Project%20Page-Coming%20Soon-777777?logo=githubpages&amp;logoColor=white" alt="Project page: coming soon" /></a>
 </p>
 
@@ -258,3 +258,19 @@ We thank the teams behind the following works for their contributions and open r
 ## License
 
 RS-OPSD is distributed under the [Apache-2.0 license](rs-opsd/LICENSE).
+
+## Citation
+
+If you find this work useful, please cite:
+
+```bibtex
+@misc{jiang2026rsopsdreliableprivilegedonpolicyselfdistillation,
+      title={RS-OPSD: Reliable Privileged On-Policy-Self-Distillation for Ultra-High-Resolution Remote Sensing VQA},
+      author={Chengjie Jiang and Yunqi Zhou and Jiafeng Yan and Sihang Zhao and Chun Yuan and Jing Li},
+      year={2026},
+      eprint={2609.38072},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2609.38072},
+}
+```
