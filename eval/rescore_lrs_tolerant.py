@@ -47,7 +47,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_lrs_records(path: Path) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
+    # Evaluation recovery appends retries; retain the latest attempt per sample.
+    records: dict[str, dict[str, Any]] = {}
     with path.open(encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
             if not line.strip():
@@ -58,10 +59,12 @@ def load_lrs_records(path: Path) -> list[dict[str, Any]]:
                 raise ValueError(f"Invalid JSONL at {path}:{line_number}") from error
             if not isinstance(record, dict) or record.get("dataset") != "lrs-vqa":
                 raise ValueError(f"Expected an lrs-vqa record at {path}:{line_number}")
-            records.append(record)
+            if "sample_id" not in record:
+                raise ValueError(f"Missing sample_id at {path}:{line_number}")
+            records[str(record["sample_id"])] = record
     if not records:
         raise ValueError(f"No LRS-VQA records found in {path}")
-    return records
+    return list(records.values())
 
 
 def rescore_records(

@@ -102,7 +102,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-root", type=_path, default=REPO_ROOT / "eval" / "results")
     parser.add_argument("--run-name", default=None)
-    parser.add_argument("--resume", action="store_true", help="Skip sample IDs already written to JSONL output.")
+    parser.add_argument("--resume", action="store_true", help="Skip successful samples and retry failed samples.")
     parser.add_argument("--limit", type=int, default=None, help="Maximum new samples per selected dataset.")
     parser.add_argument("--dry-run", action="store_true", help="Validate dataset layouts without starting inference.")
     args = parser.parse_args()
@@ -165,16 +165,7 @@ def resolve_run_name(args: argparse.Namespace) -> str:
 def completed_ids(path: Path) -> set[str]:
     if not path.is_file():
         return set()
-    ids = set()
-    with path.open(encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, start=1):
-            if not line.strip():
-                continue
-            try:
-                ids.add(str(json.loads(line)["sample_id"]))
-            except (json.JSONDecodeError, KeyError) as error:
-                raise ValueError(f"Invalid result JSONL at {path}:{line_number}") from error
-    return ids
+    return {str(record["sample_id"]) for record in load_records(path) if record.get("status") == "ok"}
 
 
 def record_for_error(sample: EvalSample, error: Exception, elapsed_sec: float = 0.0) -> dict[str, Any]:
@@ -237,8 +228,18 @@ def _next_sample(iterator, completed: set[str], limit: int | None, submitted: in
 
 
 def load_records(path: Path) -> list[dict[str, Any]]:
+    """Read the latest attempt per sample from the append-only result log."""
+    records: dict[str, dict[str, Any]] = {}
     with path.open(encoding="utf-8") as handle:
-        return [json.loads(line) for line in handle if line.strip()]
+        for line_number, line in enumerate(handle, start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+                records[str(record["sample_id"])] = record
+            except (json.JSONDecodeError, KeyError, TypeError) as error:
+                raise ValueError(f"Invalid result JSONL at {path}:{line_number}") from error
+    return list(records.values())
 
 
 def run_dataset(

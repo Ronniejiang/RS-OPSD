@@ -18,7 +18,7 @@ dynamic = ["version"]
 
 description = "RS-OPSD training code built on verl"
 license = {text = "Apache-2.0"}
-readme = {text = "RS-OPSD training code. Installation and usage: https://github.com/Ronniejiang/RS-OPSD#rs-opsd-training", content-type = "text/markdown"}
+readme = {text = "RS-OPSD training code. Installation and usage: https://github.com/Ronniejiang/RS-OPSD#training", content-type = "text/markdown"}
 requires-python = ">=3.10"
 
 dependencies = []

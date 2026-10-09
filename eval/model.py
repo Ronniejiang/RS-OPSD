@@ -167,7 +167,8 @@ class TransformersGenerator:
             from transformers import AutoModelForImageTextToText, AutoProcessor
         except ImportError as error:
             raise ImportError(
-                "Local Transformers inference requires both 'torch' and 'transformers'."
+                "Local inference requires a compatible torch runtime and Transformers >=4.57.3,<5 "
+                "with AutoModelForImageTextToText. Install: pip install -r eval/requirements-local.txt"
             ) from error
 
         if not model_path.is_dir() or not (model_path / "config.json").is_file():

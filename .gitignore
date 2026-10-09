@@ -10,6 +10,9 @@ htmlcov/
 
 # Virtual environments and local configuration
 .venv/
+.venv-infer/
+.venv-eval/
+.venv-train/
 venv/
 .env
 .env.*
@@ -28,6 +31,8 @@ eval/results/
 eval/thinking_results/
 
 # Large model artifacts and run output
+/models/
+/data/
 *.ckpt
 *.pt
 *.pth

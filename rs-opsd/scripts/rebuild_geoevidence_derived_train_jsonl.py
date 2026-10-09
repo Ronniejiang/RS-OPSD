@@ -20,6 +20,8 @@ from typing import Any
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--allow-external-image-links", action="store_true",
+                        help="Allow relative image paths to symlink to an extracted release outside data-root.")
     parser.add_argument(
         "--data-root",
         type=Path,
@@ -45,22 +47,26 @@ def _one_relative_image(item: dict[str, Any], field: str, *, row_number: int) ->
     return values[0]
 
 
-def _checked_file(root: Path, relative_path: str, *, field: str, row_number: int) -> None:
-    path = (root / relative_path).resolve()
+def _checked_file(root: Path, relative_path: str, *, field: str, row_number: int,
+                  allow_external_links: bool = False) -> None:
+    path = root / relative_path
     try:
-        path.relative_to(root.resolve())
+        path.resolve().relative_to(root.resolve())
     except ValueError as exc:
-        raise ValueError(f"row {row_number}: {field} escapes its data root: {relative_path!r}") from exc
+        if not (allow_external_links and path.is_symlink()):
+            raise ValueError(f"row {row_number}: {field} escapes its data root: {relative_path!r}") from exc
     if not path.is_file():
         raise FileNotFoundError(f"row {row_number}: missing {field}: {path}")
 
 
-def _derived_record(base: dict[str, Any], *, row_number: int, root: Path) -> dict[str, Any]:
+def _derived_record(base: dict[str, Any], *, row_number: int, root: Path,
+                    allow_external_links: bool = False) -> dict[str, Any]:
     full_image = _one_relative_image(base, "images", row_number=row_number)
     tight_crop = _one_relative_image(base, "teacher_images", row_number=row_number)
-    _checked_file(root, full_image, field="images", row_number=row_number)
-    _checked_file(root, tight_crop, field="teacher_images", row_number=row_number)
-    _checked_file(root / "derived", tight_crop, field="derived teacher_images", row_number=row_number)
+    _checked_file(root, full_image, field="images", row_number=row_number, allow_external_links=allow_external_links)
+    _checked_file(root, tight_crop, field="teacher_images", row_number=row_number, allow_external_links=allow_external_links)
+    _checked_file(root / "derived", tight_crop, field="derived teacher_images", row_number=row_number,
+                  allow_external_links=allow_external_links)
     if not isinstance(base.get("problem"), str) or not isinstance(base.get("answer"), str):
         raise ValueError(f"row {row_number}: expected string problem and answer")
 
@@ -99,7 +105,8 @@ def main() -> int:
                 raise ValueError(f"invalid JSON in {source}:{row_number}") from exc
             if not isinstance(base, dict):
                 raise ValueError(f"expected an object at {source}:{row_number}")
-            records.append(_derived_record(base, row_number=row_number, root=root))
+            records.append(_derived_record(base, row_number=row_number, root=root,
+                                           allow_external_links=args.allow_external_image_links))
     if not records:
         raise ValueError(f"base manifest is empty: {source}")
 

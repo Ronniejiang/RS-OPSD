@@ -32,7 +32,7 @@ def main():
         assert Path(teachers[0]["path"]) == root / args.teacher_full_view / tail
         assert Path(teachers[-1]["path"]) == root / raw["teacher_images"][0]
         if three:
-            assert Path(teachers[1]["path"]) == root / "derived" / raw["teacher_images"][0]
+            assert Path(teachers[1]["path"]).resolve() == (root / "derived" / raw["teacher_images"][0]).resolve()
         hint = _REMOVE_HINT in row["prompt"][0]["content"]
         assert hint == (args.student_view == "bbox_images" and _REMOVE_HINT in raw["problem"])
         hint_count += hint

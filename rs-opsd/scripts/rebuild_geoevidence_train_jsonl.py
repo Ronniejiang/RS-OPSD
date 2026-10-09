@@ -19,6 +19,8 @@ from typing import Any
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--allow-external-image-links", action="store_true",
+                        help="Allow relative image paths to symlink to an extracted release outside data-root.")
     parser.add_argument(
         "--data-root",
         type=Path,
@@ -34,15 +36,20 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def one_existing_image(row: dict[str, Any], field: str, root: Path, row_number: int) -> None:
+def one_existing_image(row: dict[str, Any], field: str, root: Path, row_number: int,
+                       allow_external_links: bool = False) -> None:
     value = row.get(field)
     if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], str) or not value[0]:
         raise ValueError(f"row {row_number}: {field} must be a one-element non-empty string list")
-    path = (root / value[0]).resolve()
+    relative = Path(value[0])
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"row {row_number}: {field} must be a safe relative path")
+    path = root / relative
     try:
-        path.relative_to(root.resolve())
+        path.resolve().relative_to(root.resolve())
     except ValueError as exc:
-        raise ValueError(f"row {row_number}: {field} escapes data root: {value[0]!r}") from exc
+        if not (allow_external_links and path.is_symlink()):
+            raise ValueError(f"row {row_number}: {field} escapes data root: {value[0]!r}") from exc
     if not path.is_file():
         raise FileNotFoundError(f"row {row_number}: missing {field}: {path}")
 
@@ -65,8 +72,8 @@ def main() -> int:
         raise ValueError(f"expected a non-empty JSON object list: {annotations_path}")
 
     for row_number, row in enumerate(rows, start=1):
-        one_existing_image(row, "images", root, row_number)
-        one_existing_image(row, "teacher_images", root, row_number)
+        one_existing_image(row, "images", root, row_number, args.allow_external_image_links)
+        one_existing_image(row, "teacher_images", root, row_number, args.allow_external_image_links)
         if not isinstance(row.get("problem"), str) or not isinstance(row.get("answer"), str):
             raise ValueError(f"row {row_number}: expected string problem and answer")
 
